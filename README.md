@@ -47,6 +47,10 @@ açmamak için `--no-browser` kullanılabilir. Chrome, Edge veya Safari'nin gün
 3. **Karşılaştır:** kaydırmalı veya yan yana görünüm.
 4. **Paylaş:** otomatik, yan yana veya alt alta düzen; 4:5, 1:1, 9:16 veya orijinal oran; BEFORE / AFTER
    yazısı ve logo. Paylaşım görseli PNG/JPEG, tek fotoğraf JPEG/TIFF olarak tam çözünürlükte indirilir.
+   **Kaydırmalı video** Instagram için MP4 üretir: önce Before görünür, ayraç kayıp After'ı gösterir,
+   birkaç kez ileri geri gider ve After'da durur. 6, 8 veya 10 saniye; 1080 piksel genişlik, 30 kare/sn,
+   H.264. Oran, sığdırma, yazılar ve logo paylaşım ayarlarından gelir (Reels için 9:16, gönderi için 4:5).
+   Video tarayıcıda kodlanır; Chrome, Edge veya Safari'nin güncel sürümü gerekir.
 
 Eşleştirme, iki fotoğrafın çerçevede görünen alanının Lab parlaklık dağılımını (koyu, orta, açık tonlar) ve
 ortalama rengini ölçer; pozlama, parlak alanlar, gölgeler, sıcaklık ve renk tonu ayarlarını bunlar örtüşene
