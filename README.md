@@ -12,6 +12,21 @@ Windows ve macOS'ta aynı şekilde çalışır.
 
 ## Kurulum
 
+### Çift tıklayarak (önerilen)
+
+1. [python.org](https://www.python.org/downloads/) adresinden Python 3.12 veya 3.13 kurun. Windows'ta kurulumun
+   ilk ekranında **Add python.exe to PATH** kutusunu işaretleyin.
+2. Projeyi indirin: `git clone https://github.com/mnoktaonokta/smartPhotodesign.git` (Git yoksa GitHub'daki
+   **Code → Download ZIP** ile indirip bir klasöre çıkarın).
+3. Windows'ta `Baslat-Windows.bat`, macOS'ta `Baslat-Mac.command` dosyasına çift tıklayın. İlk açılışta paketler
+   kurulur (internet gerekir, birkaç dakika sürer). Sonraki açılışlar birkaç saniyedir ve internet gerekmez.
+   Kapatmak için açılan siyah pencereyi kapatın.
+
+macOS 13 veya üstü gerekir. İnternetten indirilen `.command` dosyasını macOS ilk seferde engellerse dosyaya sağ
+tıklayıp **Aç**'ı seçin.
+
+### Elle
+
 Python 3.10 veya üstü gerekir.
 
 ```bash
