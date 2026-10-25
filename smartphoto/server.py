@@ -28,10 +28,13 @@ from core.image_composer import (
     LabelStyle,
     LogoStyle,
     compose,
+    content_box,
     resolve_layout,
+    slider_frames,
     to_jpeg_bytes,
     to_png_bytes,
     to_tiff_bytes,
+    video_size,
 )
 from core.image_loader import (
     PHOTO_EXTENSIONS,
@@ -108,6 +111,11 @@ def create_app(allowed_hosts: list[str] | None = None) -> FastAPI:
         body = await request.body()
         return await run_in_threadpool(_encode_response, body)
 
+    @app.post("/api/slider-frames")
+    async def slider_frames_endpoint(request: Request) -> Response:
+        body = await request.body()
+        return await run_in_threadpool(_slider_frames_response, body)
+
     if WEB_DIR.is_dir():
         app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
     return app
@@ -158,12 +166,7 @@ def _compose_response(body: bytes) -> Response:
     header, payload = _unpack(body)
     before = _rgba_part(header, payload, "before")
     after = _rgba_part(header, payload, "after")
-    logo = None
-    if header.get("logo"):
-        try:
-            logo = load_logo(_slice(payload, header["logo"]))
-        except ImageLoadError as exc:
-            raise HTTPException(400, str(exc)) from exc
+    logo = _logo_part(header, payload)
     settings = composition_from_json(header.get("settings", {}), before)
     fmt = header.get("format", "preview")
     if fmt == "preview":
@@ -174,6 +177,33 @@ def _compose_response(body: bytes) -> Response:
     response.headers["X-Layout"] = settings.layout
     response.headers["X-Size"] = f"{image.width}x{image.height}"
     return response
+
+
+def _slider_frames_response(body: bytes) -> Response:
+    """Before and After video frames as one PNG, Before on top."""
+    header, payload = _unpack(body)
+    before = _rgba_part(header, payload, "before")
+    after = _rgba_part(header, payload, "after")
+    logo = _logo_part(header, payload)
+    settings = composition_from_json(header.get("settings", {}), before)
+    size = video_size(before, settings.aspect)
+    first, second = slider_frames(before, after, settings, logo, size)
+    sheet = Image.new("RGB", (first.width, first.height * 2))
+    sheet.paste(first, (0, 0))
+    sheet.paste(second, (0, first.height))
+    response = Response(content=to_png_bytes(sheet, compress_level=1), media_type=MIME_TYPES["png"])
+    response.headers["X-Size"] = f"{first.width}x{first.height}"
+    response.headers["X-Content"] = ",".join(str(v) for v in content_box(before, *size, settings.fit))
+    return response
+
+
+def _logo_part(header: dict[str, Any], payload: memoryview) -> Image.Image | None:
+    if not header.get("logo"):
+        return None
+    try:
+        return load_logo(_slice(payload, header["logo"]))
+    except ImageLoadError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 def _encode_response(body: bytes) -> Response:

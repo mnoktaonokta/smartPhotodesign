@@ -22,6 +22,8 @@ CENTER: Align = (0.5, 0.5)
 
 ASPECT_VALUES: dict[str, float] = {"1:1": 1.0, "4:5": 4 / 5, "9:16": 9 / 16}
 MAX_CANVAS_SIDE = 6000
+VIDEO_WIDTH = 1080
+VIDEO_MAX_HEIGHT = 1920
 FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
 
 
@@ -84,10 +86,54 @@ def compose(
         texts = [settings.labels.before_text, settings.labels.after_text]
         for text, image, origin, align in zip(texts, (before, after), origins, aligns):
             x0, y0, x1, y1 = content_box(image, panel_w, panel_h, settings.fit, align)
-            _draw_label(canvas, text, (origin[0] + x0, origin[1] + y0), settings.labels, max(x1 - x0, y1 - y0))
+            box = (origin[0] + x0, origin[1] + y0, origin[0] + x1, origin[1] + y1)
+            _draw_label(canvas, text, box, settings.labels)
     if logo is not None:
-        _paste_logo(canvas, logo, settings)
+        _paste_logo(canvas, logo, settings.logo.position, settings.logo)
     return canvas.convert("RGB")
+
+
+def video_size(image: np.ndarray, aspect: AspectRatio) -> tuple[int, int]:
+    """Instagram-friendly video frame size: 1080 wide, even height, at most 1920 tall."""
+    if aspect == "original":
+        h, w = image.shape[:2]
+        ratio = w / h
+    else:
+        ratio = ASPECT_VALUES[aspect]
+    width = VIDEO_WIDTH
+    height = min(VIDEO_MAX_HEIGHT, round(width / ratio / 2) * 2)
+    return width, max(2, height)
+
+
+def slider_frames(
+    before: np.ndarray,
+    after: np.ndarray,
+    settings: CompositionSettings,
+    logo: Image.Image | None = None,
+    size: tuple[int, int] | None = None,
+) -> tuple[Image.Image, Image.Image]:
+    """Full-canvas Before and After frames for a sliding-divider video.
+
+    Both frames share the same photo placement and logo so that revealing one
+    over the other only changes the photo and its label. The Before label sits
+    top-left and the After label top-right, matching the divider sides.
+    """
+    width, height = size or video_size(before, settings.aspect)
+    # A logo centred on the canvas would cover the subject once the divider moves.
+    logo_position: str = "bottom_center" if settings.logo.position == "divider" else settings.logo.position
+    frames = []
+    for image, text, side in (
+        (before, settings.labels.before_text, "left"),
+        (after, settings.labels.after_text, "right"),
+    ):
+        panel = fit_to_panel(image, width, height, settings.fit, settings.background)
+        canvas = Image.fromarray(panel).convert("RGBA")
+        if settings.labels.enabled:
+            _draw_label(canvas, text, content_box(image, width, height, settings.fit), settings.labels, side)
+        if logo is not None:
+            _paste_logo(canvas, logo, logo_position, settings.logo)
+        frames.append(canvas.convert("RGB"))
+    return frames[0], frames[1]
 
 
 def resolve_layout(image: np.ndarray, aspect: AspectRatio) -> Layout:
@@ -182,9 +228,9 @@ def _interpolation(scale: float) -> int:
     return cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4
 
 
-def to_png_bytes(image: Image.Image) -> bytes:
+def to_png_bytes(image: Image.Image, compress_level: int = 6) -> bytes:
     buf = io.BytesIO()
-    image.save(buf, format="PNG", compress_level=6)
+    image.save(buf, format="PNG", compress_level=compress_level)
     return buf.getvalue()
 
 
@@ -208,11 +254,18 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default(size)
 
 
-def _draw_label(canvas: Image.Image, text: str, origin: tuple[int, int], style: LabelStyle, photo_side: int) -> None:
-    """Draw ``text`` in the photo's top-left corner, sized relative to its long side."""
+def _draw_label(
+    canvas: Image.Image,
+    text: str,
+    box: tuple[int, int, int, int],
+    style: LabelStyle,
+    side: Literal["left", "right"] = "left",
+) -> None:
+    """Draw ``text`` in the top corner of the photo ``box``, sized relative to its long side."""
     text = text.strip()
     if not text:
         return
+    photo_side = max(box[2] - box[0], box[3] - box[1])
     font_px = max(10, round(photo_side * style.size_percent / 100))
     font = _font(font_px)
     pad_x, pad_y = round(font_px * 0.6), round(font_px * 0.35)
@@ -223,7 +276,8 @@ def _draw_label(canvas: Image.Image, text: str, origin: tuple[int, int], style: 
     left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
     box_w = right - left + 2 * pad_x
     box_h = bottom - top + 2 * pad_y
-    x, y = origin[0] + margin, origin[1] + margin
+    x = box[0] + margin if side == "left" else box[2] - margin - box_w
+    y = box[1] + margin
 
     alpha = round(255 * float(np.clip(style.background_opacity, 0, 1)))
     if alpha:
@@ -232,9 +286,8 @@ def _draw_label(canvas: Image.Image, text: str, origin: tuple[int, int], style: 
     canvas.alpha_composite(overlay)
 
 
-def _paste_logo(canvas: Image.Image, logo: Image.Image, settings: CompositionSettings) -> None:
+def _paste_logo(canvas: Image.Image, logo: Image.Image, position: str, style: LogoStyle) -> None:
     width, height = canvas.size
-    style = settings.logo
     target_w = max(1, round(width * style.width_percent / 100))
     target_h = max(1, round(logo.height * target_w / logo.width))
     max_h = round(height * 0.3)
@@ -249,9 +302,11 @@ def _paste_logo(canvas: Image.Image, logo: Image.Image, settings: CompositionSet
         resized.putalpha(Image.fromarray(alpha.round().astype(np.uint8)))
 
     margin = round(min(width, height) * 0.03)
-    if style.position == "divider":
+    if position == "divider":
         x, y = (width - target_w) // 2, (height - target_h) // 2
-    elif style.position == "top_right":
+    elif position == "bottom_center":
+        x, y = (width - target_w) // 2, height - target_h - margin
+    elif position == "top_right":
         x, y = width - target_w - margin, margin
     else:
         x, y = width - target_w - margin, height - target_h - margin

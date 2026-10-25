@@ -13,9 +13,11 @@ from core.image_composer import (
     divider_width,
     fit_to_panel,
     resolve_layout,
+    slider_frames,
     to_jpeg_bytes,
     to_png_bytes,
     to_tiff_bytes,
+    video_size,
 )
 
 
@@ -150,6 +152,36 @@ def test_padded_photos_meet_at_the_divider():
     middle = image.shape[0] // 2
     assert dark_rows.min() > 0 and dark_rows.max() < image.shape[0] - 1
     assert np.any(np.abs(dark_rows - middle) <= gap)
+
+
+@pytest.mark.parametrize(
+    ("aspect", "size"),
+    [("4:5", (1080, 1350)), ("9:16", (1080, 1920)), ("1:1", (1080, 1080)), ("original", (1080, 720))],
+)
+def test_video_size_is_instagram_friendly(aspect, size):
+    assert video_size(_solid(400, 600, (0, 0, 0)), aspect) == size
+
+
+def test_slider_frames_label_sides_and_shared_logo():
+    photo = _solid(400, 600, (0, 0, 0))
+    settings = CompositionSettings(
+        aspect="4:5",
+        fit="crop",
+        labels=LabelStyle(text_color=(255, 0, 0), background_opacity=0),
+        logo=LogoStyle(position="divider", width_percent=20, opacity=1),
+    )
+    logo = Image.new("RGBA", (100, 50), (0, 255, 0, 255))
+    before, after = (np.asarray(f) for f in slider_frames(photo, photo, settings, logo))
+    assert before.shape == after.shape == (1350, 1080, 3)
+
+    def red_columns(image):
+        return np.nonzero(((image[..., 0] > 200) & (image[..., 1] < 80)).any(axis=0))[0]
+
+    assert red_columns(before).max() < 540 < red_columns(after).min()
+    green = (before[..., 1] > 200) & (before[..., 0] < 80)
+    rows = np.nonzero(green.any(axis=1))[0]
+    assert rows.min() > 1350 * 0.6
+    np.testing.assert_array_equal(green, (after[..., 1] > 200) & (after[..., 0] < 80))
 
 
 def test_exports_round_trip():

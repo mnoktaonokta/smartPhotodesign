@@ -88,6 +88,24 @@ def test_compose_rejects_size_mismatch(client):
     assert client.post("/api/compose", content=body).status_code == 400
 
 
+def test_slider_frames_stack_before_over_after(client):
+    body = _pack(
+        {"settings": {"aspect": "9:16", "fit": "crop", "labels": {"enabled": False}}},
+        {
+            "before": (_rgba(300, 200, (255, 0, 0)), {"width": 300, "height": 200}),
+            "after": (_rgba(300, 200, (0, 0, 255)), {"width": 300, "height": 200}),
+        },
+    )
+    response = client.post("/api/slider-frames", content=body)
+    assert response.status_code == 200
+    assert response.headers["X-Size"] == "1080x1920"
+    assert response.headers["X-Content"] == "0,0,1080,1920"
+    with Image.open(io.BytesIO(response.content)) as img:
+        assert img.size == (1080, 3840)
+        assert img.getpixel((540, 960)) == (255, 0, 0)
+        assert img.getpixel((540, 2880)) == (0, 0, 255)
+
+
 def test_encode_tiff(client):
     body = _pack({"format": "tiff"}, {"image": (_rgba(20, 10, (1, 2, 3)), {"width": 20, "height": 10})})
     response = client.post("/api/encode", content=body)
