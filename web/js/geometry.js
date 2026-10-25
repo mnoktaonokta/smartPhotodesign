@@ -25,8 +25,10 @@ export function frameAspect(aspectKey, width, height, quarter = 0) {
   return quarter % 2 === 0 ? width / height : height / width;
 }
 
+// Positive angles turn the photo clockwise on screen (as in Lightroom), which
+// means rotating the frame counter-clockwise on the photo.
 function thetaOf(geometry) {
-  return ((geometry.quarter * 90 + geometry.angle) * Math.PI) / 180;
+  return (-(geometry.quarter * 90 + geometry.angle) * Math.PI) / 180;
 }
 
 /** Largest frame width (in photo pixels) of the given aspect that fits inside the rotated photo. */
