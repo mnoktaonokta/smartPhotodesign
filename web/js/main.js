@@ -17,8 +17,11 @@ import {
 import { blendMatch, measure, solveMatch } from "./match.js";
 import { MAX_MASKS } from "./shaders.js";
 import { Renderer } from "./renderer.js";
+import { VIDEO_DURATIONS, encodeSliderVideo } from "./slider-video.js";
 
 const MAX_EXPORT_SIDE = 6000;
+// Enough source pixels for a 1080 x 1920 frame even when the photo is cropped to fill it.
+const VIDEO_SOURCE_SIDE = 2400;
 const SHARE_PREVIEW_SIDE = 1400;
 const MEASURE_SIDE = 160;
 const FRAME_PADDING = 0.86;
@@ -42,6 +45,7 @@ const state = {
     background: "#FFFFFF",
     labels: { enabled: true, beforeText: "BEFORE", afterText: "AFTER", sizePercent: 4, textColor: "#FFFFFF", backgroundOpacity: 0.45 },
     logo: { position: "divider", widthPercent: 18, opacity: 0.9 },
+    videoDuration: "normal",
     logoBytes: null,
     logoName: null,
     previewUrl: null,
@@ -164,14 +168,14 @@ function renderSmall(photo, longSide, params) {
   return { rgba: renderer.renderPixels(buildJob(photo, { params }), w, h), width: w, height: h };
 }
 
-async function renderFull(photo) {
+async function renderFull(photo, maxSide = MAX_EXPORT_SIDE) {
   const full = await fetchPixels(photo.meta.id, { full: true, maxSide: renderer.maxTextureSize });
   const texture = renderer.createTexture(full.width, full.height, full.data);
   try {
     const rect = photoRect(photo);
     const scale = full.width / photo.meta.width;
     let longSide = Math.round(Math.max(rect.fw, rect.fh) * scale);
-    longSide = Math.min(longSide, MAX_EXPORT_SIDE);
+    longSide = Math.min(longSide, maxSide);
     const [w, h] = frameSize(longSide);
     return { rgba: renderer.renderPixels(buildJob(photo, { texture }), w, h), width: w, height: h };
   } finally {
@@ -1015,13 +1019,32 @@ function sharePanel() {
     ),
     section(
       "İndir",
-      el("p", { class: "hint" }, s.previewInfo),
+      el("p", { class: "hint", id: "share-info" }, s.previewInfo),
       el("button", { type: "button", class: "button primary wide", onclick: () => exportComposite("png").catch(showError) }, "Paylaşım görseli · PNG"),
       el("button", { type: "button", class: "button wide", onclick: () => exportComposite("jpeg").catch(showError) }, "Paylaşım görseli · JPEG %100"),
       el("button", { type: "button", class: "button wide", onclick: () => exportSingle("after", "jpeg").catch(showError) }, "Yalnız After · JPEG"),
       el("button", { type: "button", class: "button wide", onclick: () => exportSingle("after", "tiff").catch(showError) }, "Yalnız After · TIFF"),
       el("button", { type: "button", class: "button wide", onclick: () => exportSingle("before", "jpeg").catch(showError) }, "Yalnız Before · JPEG"),
       el("p", { class: "hint" }, "Dosyalar tam çözünürlükte hazırlanır; RAW fotoğraflarda birkaç saniye sürebilir. Çıktı sosyal medya içindir, klinik teşhis kaydının yerine geçmez."),
+    ),
+    section(
+      "Kaydırmalı video",
+      el(
+        "p",
+        { class: "hint" },
+        "Önce Before görünür, ayraç kayıp After'ı gösterir, birkaç kez ileri geri gider ve After'da durur. Oran, sığdırma, yazılar ve logo yukarıdaki ayarlardan gelir; Reels için 9:16, gönderi için 4:5 seçin.",
+      ),
+      select(
+        "Süre",
+        [
+          ["short", `Kısa (${VIDEO_DURATIONS.short} sn)`],
+          ["normal", `Normal (${VIDEO_DURATIONS.normal} sn)`],
+          ["long", `Uzun (${VIDEO_DURATIONS.long} sn)`],
+        ],
+        s.videoDuration,
+        (v) => (s.videoDuration = v),
+      ),
+      el("button", { type: "button", class: "button primary wide", onclick: () => exportSliderVideo().catch(showError) }, "Kaydırmalı video · MP4"),
     ),
   ];
 }
@@ -1056,7 +1079,7 @@ async function updateSharePreview() {
   const layout = response.headers.get("X-Layout") === "stacked" ? "Alt alta" : "Yan yana";
   state.share.previewInfo = `${layout} düzen. Önizleme; indirilen dosya tam çözünürlüktedir.`;
   sharePreview.src = state.share.previewUrl;
-  const info = panel.querySelector(".panel-section:last-child .hint");
+  const info = document.getElementById("share-info");
   if (info) info.textContent = state.share.previewInfo;
   requestDraw();
 }
@@ -1081,6 +1104,35 @@ async function exportSingle(slot, format) {
     const render = await renderFull(photo);
     const response = await postParts("/api/encode", { format }, { image: rgbaPart(render) });
     download(await response.blob(), `${stem(photo.meta.name)}_duzenlenmis.${format === "jpeg" ? "jpg" : "tif"}`);
+  });
+}
+
+async function exportSliderVideo() {
+  const { before, after } = state.photos;
+  await withBusy("Video hazırlanıyor…", async () => {
+    const b = await renderFull(before, VIDEO_SOURCE_SIDE);
+    const a = await renderFull(after, VIDEO_SOURCE_SIDE);
+    const response = await postParts("/api/slider-frames", shareHeader("png"), {
+      before: rgbaPart(b),
+      after: rgbaPart(a),
+      logo: state.share.logoBytes ? { bytes: state.share.logoBytes, meta: {} } : null,
+    });
+    const [width, height] = response.headers.get("X-Size").split("x").map(Number);
+    const box = response.headers.get("X-Content").split(",").map(Number);
+    const sheet = await createImageBitmap(await response.blob());
+    try {
+      const video = await encodeSliderVideo({
+        sheet,
+        width,
+        height,
+        box,
+        duration: VIDEO_DURATIONS[state.share.videoDuration],
+        onProgress: (p) => setBusyMessage(`Video hazırlanıyor… %${Math.round(p * 100)}`),
+      });
+      download(video, `${stem(after.meta.name)}_before_after.mp4`);
+    } finally {
+      sheet.close();
+    }
   });
 }
 
@@ -1119,8 +1171,12 @@ logoInput.addEventListener("change", async () => {
   scheduleSharePreview(0);
 });
 
-async function withBusy(message, fn) {
+function setBusyMessage(message) {
   busy.querySelector("span").textContent = message;
+}
+
+async function withBusy(message, fn) {
+  setBusyMessage(message);
   busy.hidden = false;
   await new Promise((r) => setTimeout(r, 30));
   try {
