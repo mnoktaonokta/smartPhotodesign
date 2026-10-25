@@ -34,16 +34,21 @@ açmamak için `--no-browser` kullanılabilir. Chrome, Edge veya Safari'nin gün
 1. **Before:** Fotoğrafı açın (sürükle-bırak da olur).
    - **Kadraj:** oran, yakınlaştırma (fare tekerleği imlecin olduğu yere yaklaşır), açı ve 90° döndürme.
      Fotoğrafı sürükleyerek çerçeve içinde kaydırın.
-   - **Işık:** pozlama, kontrast, parlak alanlar, gölgeler, beyazlar, siyahlar.
-   - **Renk:** RAW'da Kelvin cinsinden sıcaklık ve renk tonu, JPEG'de göreli ölçek; canlılık, doygunluk.
-   - **Hazır ayarlar:** "Diş odaklı (3900 K, gölgeler −100)" hazır gelir. Kendi ayarınızı kaydedebilirsiniz
+   - **Light:** Exposure, Contrast, Highlights, Shadows, Whites, Blacks (Lightroom'daki adlarıyla).
+   - **Color:** RAW'da Kelvin cinsinden Temp ve Tint, JPEG'de göreli ölçek; Vibrance, Saturation.
+   - Her ayarın sağındaki değere tıklayıp sayı yazılabilir (Enter uygular, Esc vazgeçer, ↑/↓ adım adım,
+     Shift ile 10 adım). Etikete çift tıklamak sıfırlar.
+   - **Hazır ayarlar:** "Diş odaklı (3900 K, Shadows −100)" hazır gelir. Kendi ayarınızı kaydedebilirsiniz
      (tarayıcıda saklanır).
    - **Doğrusal maske:** fotoğraf üzerinde sürükleyerek çizilir. Etki düz çizgide tam, kesikli çizgide
-     sıfırdır. Maskenin kendi pozlama, kontrast, parlak alan, gölge, sıcaklık, renk tonu ve doygunluk ayarı
+     sıfırdır. Maskenin kendi Exposure, Contrast, Highlights, Shadows, Temp, Tint ve Saturation ayarı
      vardır. En fazla 8 maske.
 2. **After:** Fotoğraf açılınca Before'un ışık/renk ayarları ve kadrajı kopyalanır, sonra otomatik eşleştirme
    yapılır. **Eşleştirme gücü** (%0 yalnız kopyalanan ayarlar, %100 tam eşleşme) ve tüm ayarlar elle
    değiştirilebilir. Kadrajı Before ile aynı bölgeye getirip **İlk fotoğrafla eşleştir**'e yeniden basın.
+   Fotoğrafın üstündeki düğmelerle After düzenlenirken Before da görülebilir: **Yalnız After**,
+   **Yan yana** (varsayılan) veya **Ayraçlı**. `\` tuşu Before karşılaştırmasını açıp kapatır. Kaydırma,
+   yakınlaştırma ve maskeler her görünümde After'a uygulanır; ayraçlı görünümde çizgi sürüklenerek kaydırılır.
 3. **Karşılaştır:** kaydırmalı veya yan yana görünüm.
 4. **Paylaş:** otomatik, yan yana veya alt alta düzen; 4:5, 1:1, 9:16 veya orijinal oran; BEFORE / AFTER
    yazısı ve logo. Paylaşım görseli PNG/JPEG, tek fotoğraf JPEG/TIFF olarak tam çözünürlükte indirilir.
@@ -53,7 +58,7 @@ açmamak için `--no-browser` kullanılabilir. Chrome, Edge veya Safari'nin gün
    Video tarayıcıda kodlanır; Chrome, Edge veya Safari'nin güncel sürümü gerekir.
 
 Eşleştirme, iki fotoğrafın çerçevede görünen alanının Lab parlaklık dağılımını (koyu, orta, açık tonlar) ve
-ortalama rengini ölçer; pozlama, parlak alanlar, gölgeler, sıcaklık ve renk tonu ayarlarını bunlar örtüşene
+ortalama rengini ölçer; Exposure, Highlights, Shadows, Temp ve Tint ayarlarını bunlar örtüşene
 kadar ayarlar. Siyah kontrastör fonu ve parlama noktaları hesaba katılmaz. Sonuç gerçek kaydırıcı
 değerleridir, bu yüzden üzerine elle ince ayar yapılabilir.
 
