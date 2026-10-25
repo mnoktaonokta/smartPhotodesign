@@ -83,5 +83,7 @@ node --test tests/js/*.test.mjs
 | `web/js/color.js` | Kelvin/renk tonu ve beyaz dengesi hesapları |
 | `web/js/geometry.js` | Kadraj, döndürme, yakınlaştırma ve kaydırma |
 | `web/js/match.js` | Fotoğraf ölçümü ve ayar eşleştirme çözücüsü |
+| `web/js/slider-video.js` | Kaydırmalı video zaman çizelgesi ve MP4 kodlama |
 
-Etiket fontu DejaVu Sans Bold'dur (`assets/fonts/DejaVu-LICENSE.txt`).
+Etiket fontu DejaVu Sans Bold'dur (`assets/fonts/DejaVu-LICENSE.txt`). MP4 paketleme için
+[mp4-muxer](https://github.com/Vanilagy/mp4-muxer) 5.2.2 projeye kopyalanmıştır (`web/vendor/`, MIT lisansı).
