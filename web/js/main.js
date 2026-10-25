@@ -28,7 +28,7 @@ const FRAME_PADDING = 0.86;
 const DEFAULT_MATCH_STRENGTH = 0.8;
 const PRESET_STORAGE_KEY = "spd.presets.v1";
 const BUILTIN_PRESETS = [
-  { name: "Diş odaklı (3900 K, gölgeler −100)", builtin: true, kelvin: true, params: { temperature: 3900, shadows: -100 } },
+  { name: "Diş odaklı (3900 K, Shadows −100)", builtin: true, kelvin: true, params: { temperature: 3900, shadows: -100 } },
 ];
 const GLOBAL_KEYS = ["exposure", "contrast", "highlights", "shadows", "whites", "blacks", "temperature", "tint", "vibrance", "saturation"];
 const SLOTS = { before: "Before", after: "After" };
@@ -38,6 +38,8 @@ const state = {
   aspect: "original",
   photos: { before: null, after: null },
   compare: { mode: "split", split: 0.5 },
+  afterView: "side",
+  lastAfterCompare: "side",
   share: {
     layout: "auto",
     aspect: "4:5",
@@ -252,11 +254,41 @@ function requestDraw() {
   });
 }
 
+/** How the After tab shows Before next to the photo being edited. */
+function afterViewMode() {
+  return state.tab === "after" && state.photos.before && state.photos.after ? state.afterView : "single";
+}
+
+/**
+ * Screen placement of the edited photo's frame. In side-by-side mode the
+ * edited (After) frame is on the right and ``beforeCx`` places Before on the left.
+ */
 function editLayout(canvasW, canvasH) {
   const a = currentAspect();
+  if (afterViewMode() === "side") {
+    const gap = Math.round(canvasW * 0.012);
+    const rw = Math.min((canvasW * 0.94 - gap) / 2, canvasH * FRAME_PADDING * a);
+    return { rw, rh: rw / a, cx: (canvasW + gap + rw) / 2, cy: canvasH / 2, beforeCx: (canvasW - gap - rw) / 2 };
+  }
   const rw = Math.min(canvasW * FRAME_PADDING, canvasH * FRAME_PADDING * a);
   const rh = rw / a;
   return { rw, rh, cx: canvasW / 2, cy: canvasH / 2 };
+}
+
+function frameView(L, width, height, dimOutside) {
+  return {
+    scale: [width / L.rw, height / L.rh],
+    offset: [(width / 2 - L.cx) / L.rw, (height / 2 - L.cy) / L.rh],
+    dimOutside,
+  };
+}
+
+function frameBox(L) {
+  return { x: Math.round(L.cx - L.rw / 2), y: Math.round(L.cy - L.rh / 2), w: Math.round(L.rw), h: Math.round(L.rh) };
+}
+
+function splitX(L) {
+  return Math.round(L.cx - L.rw / 2 + L.rw * state.compare.split);
 }
 
 function draw() {
@@ -280,13 +312,46 @@ function draw() {
   if (!photo) return;
   const L = editLayout(width, height);
   const overlayMask = photo.showMask ? photo.selectedMask : -1;
-  renderer.drawToCanvas(
-    buildJob(photo, { overlayMask }),
-    { x: 0, y: 0, w: width, h: height },
-    { scale: [width / L.rw, height / L.rh], offset: [0, 0], dimOutside: true },
-  );
+  const full = { x: 0, y: 0, w: width, h: height };
+  const mode = afterViewMode();
+  const before = state.photos.before;
+  if (mode === "side") {
+    const B = { ...L, cx: L.beforeCx };
+    renderer.drawToCanvas(buildJob(before), full, frameView(B, width, height, false), frameBox(B));
+    renderer.drawToCanvas(buildJob(photo, { overlayMask }), full, frameView(L, width, height, false), frameBox(L));
+    drawFrameOverlay(B, dpr, false);
+  } else {
+    renderer.drawToCanvas(buildJob(photo, { overlayMask }), full, frameView(L, width, height, true));
+    if (mode === "split") {
+      const box = frameBox(L);
+      const x = splitX(L);
+      renderer.drawToCanvas(buildJob(before), full, frameView(L, width, height, false), { ...box, w: Math.max(0, x - box.x) });
+    }
+  }
   drawFrameOverlay(L, dpr, drag?.kind === "pan");
-  drawMaskOverlay(photo, L, dpr);
+  drawMaskOverlay(photo, L, dpr, mode !== "single");
+  if (mode === "split") drawSplitHandle(L, dpr);
+  if (mode !== "single") {
+    const left = mode === "side" ? L.beforeCx - L.rw / 2 : L.cx - L.rw / 2;
+    const top = L.cy - L.rh / 2;
+    tag(overlayCtx, "BEFORE", left + 10 * dpr, top + 10 * dpr, dpr, "left");
+    tag(overlayCtx, "AFTER", L.cx + L.rw / 2 - 10 * dpr, top + 10 * dpr, dpr, "right");
+  }
+}
+
+function drawSplitHandle(L, dpr) {
+  const ctx = overlayCtx;
+  const x = splitX(L);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(x - dpr, L.cy - L.rh / 2, 2 * dpr, L.rh);
+  ctx.beginPath();
+  ctx.arc(x, L.cy, 14 * dpr, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#222";
+  ctx.font = `${13 * dpr}px system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText("↔", x, L.cy);
 }
 
 function drawFrameOverlay(L, dpr, thirds) {
@@ -320,10 +385,17 @@ function screenToImage(photo, L, sx, sy) {
   return [px / photo.meta.width, py / photo.meta.height];
 }
 
-function drawMaskOverlay(photo, L, dpr) {
+function drawMaskOverlay(photo, L, dpr, clipToFrame) {
   const mask = photo.masks[photo.selectedMask];
   if (!mask || !photo.showMask) return;
   const ctx = overlayCtx;
+  ctx.save();
+  if (clipToFrame) {
+    const box = frameBox(L);
+    ctx.beginPath();
+    ctx.rect(box.x, box.y, box.w, box.h);
+    ctx.clip();
+  }
   const A = imageToScreen(photo, L, ...mask.a);
   const B = imageToScreen(photo, L, ...mask.b);
   const dx = B[0] - A[0];
@@ -361,6 +433,7 @@ function drawMaskOverlay(photo, L, dpr) {
     ctx.strokeStyle = "rgba(0,0,0,0.6)";
     ctx.stroke();
   }
+  ctx.restore();
 }
 
 function drawCompare(width, height, dpr) {
@@ -464,6 +537,10 @@ overlay.addEventListener("pointerdown", (event) => {
     else if (near(B)) drag = { kind: "maskB" };
     else if (near(M)) drag = { kind: "maskMove", last: screenToImage(photo, L, sx, sy) };
     if (drag) return;
+  }
+  if (afterViewMode() === "split" && Math.abs(sx - splitX(L)) < 10 * dpr && Math.abs(sy - L.cy) < L.rh / 2) {
+    drag = { kind: "split" };
+    return;
   }
   drag = { kind: "pan", last: [sx, sy] };
   requestDraw();
@@ -582,7 +659,39 @@ function renderPanel() {
   panel.replaceChildren(
     ...(state.tab === "compare" ? comparePanel() : state.tab === "share" ? sharePanel() : editPanel(state.tab)),
   );
+  renderViewToggle();
 }
+
+const AFTER_VIEWS = [
+  ["single", "Yalnız After"],
+  ["side", "Yan yana"],
+  ["split", "Ayraçlı"],
+];
+
+function renderViewToggle() {
+  const node = document.getElementById("view-toggle");
+  node.hidden = !(state.tab === "after" && state.photos.before && state.photos.after);
+  if (node.hidden) return;
+  node.replaceChildren(
+    segmented(AFTER_VIEWS, state.afterView, setAfterView),
+    el("span", { class: "shortcut", title: "Klavyede \\ tuşu Before karşılaştırmasını açıp kapatır" }, "\\ tuşu"),
+  );
+}
+
+function setAfterView(mode) {
+  state.afterView = mode;
+  if (mode !== "single") state.lastAfterCompare = mode;
+  renderViewToggle();
+  requestDraw();
+}
+
+window.addEventListener("keydown", (event) => {
+  if (event.key !== "\\" || event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.target.closest?.("input, textarea, select")) return;
+  if (!(state.tab === "after" && state.photos.before && state.photos.after)) return;
+  event.preventDefault();
+  setAfterView(state.afterView === "single" ? state.lastAfterCompare : "single");
+});
 
 function syncControls() {
   const photo = state.photos[state.tab];
@@ -746,15 +855,15 @@ function paramSliders(photo, defs) {
 }
 
 function lightSection(photo) {
-  return section("Işık", ...paramSliders(photo, LIGHT_CONTROLS));
+  return section("Light", ...paramSliders(photo, LIGHT_CONTROLS));
 }
 
 function colorSection(photo) {
   const kelvin = isKelvin(photo);
   return section(
-    "Renk",
+    "Color",
     ...paramSliders(photo, colorControls(kelvin)),
-    kelvin ? null : el("p", { class: "hint" }, "JPEG’de Kelvin bilgisi olmadığı için sıcaklık ve renk tonu göreli ölçektedir."),
+    kelvin ? null : el("p", { class: "hint" }, "JPEG’de Kelvin bilgisi olmadığı için Temp ve Tint göreli ölçektedir."),
     el(
       "button",
       {
