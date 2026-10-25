@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,7 @@ from core.image_composer import (
     LogoStyle,
     compose,
     fit_to_panel,
+    resolve_layout,
     to_jpeg_bytes,
     to_png_bytes,
     to_tiff_bytes,
@@ -41,7 +43,7 @@ METHOD_LABELS = {
     "histogram": "Histogram eşleme",
 }
 WB_LABELS = {"camera": "Kamera ayarı", "auto": "Otomatik"}
-LAYOUT_LABELS = {"side_by_side": "Yan yana", "stacked": "Alt alta"}
+LAYOUT_LABELS = {"auto": "Otomatik", "side_by_side": "Yan yana", "stacked": "Alt alta"}
 ASPECT_LABELS = {
     "4:5": "4:5 Instagram gönderi",
     "1:1": "1:1 Kare",
@@ -82,7 +84,7 @@ def hex_to_rgb(value: str) -> tuple[int, int, int]:
     return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
 
 
-def sidebar_settings() -> tuple[Method, float, bool, WhiteBalance, CompositionSettings]:
+def sidebar_settings() -> tuple[Method, float, bool, WhiteBalance, str, CompositionSettings]:
     with st.sidebar:
         st.header("Renk eşleştirme")
         method: Method = st.radio("Yöntem", list(METHOD_LABELS), format_func=METHOD_LABELS.get)
@@ -105,10 +107,14 @@ def sidebar_settings() -> tuple[Method, float, bool, WhiteBalance, CompositionSe
         )
 
         st.header("Kadraj")
-        layout = st.radio("Düzen", list(LAYOUT_LABELS), format_func=LAYOUT_LABELS.get, horizontal=True)
+        layout = st.radio(
+            "Düzen",
+            list(LAYOUT_LABELS),
+            format_func=LAYOUT_LABELS.get,
+            horizontal=True,
+            help="Otomatik, fotoğrafa en az boşluk bırakan düzeni seçer.",
+        )
         aspect = st.selectbox("En-boy oranı", list(ASPECT_LABELS), format_func=ASPECT_LABELS.get)
-        if aspect == "9:16" and layout == "side_by_side":
-            st.caption("9:16 için Alt alta düzen daha iyi sonuç verir.")
         fit = st.radio("Sığdırma", list(FIT_LABELS), format_func=FIT_LABELS.get)
         background = st.color_picker("Dolgu ve ayraç rengi", "#FFFFFF")
 
@@ -126,7 +132,7 @@ def sidebar_settings() -> tuple[Method, float, bool, WhiteBalance, CompositionSe
         logo_opacity = st.slider("Logo opaklığı", 10, 100, 90, format="%d%%")
 
     composition = CompositionSettings(
-        layout=layout,
+        layout="side_by_side" if layout == "auto" else layout,
         aspect=aspect,
         fit=fit,
         background=hex_to_rgb(background),
@@ -140,12 +146,12 @@ def sidebar_settings() -> tuple[Method, float, bool, WhiteBalance, CompositionSe
         ),
         logo=LogoStyle(position=position, width_percent=logo_width, opacity=logo_opacity / 100),
     )
-    return method, strength / 100, exclude, white_balance, composition
+    return method, strength / 100, exclude, white_balance, layout, composition
 
 
 def main() -> None:
     st.set_page_config(page_title="Smart Photo Design", layout="wide")
-    method, strength, exclude, white_balance, composition = sidebar_settings()
+    method, strength, exclude, white_balance, layout_choice, composition = sidebar_settings()
 
     st.title("Smart Photo Design")
     st.caption(
@@ -179,6 +185,9 @@ def main() -> None:
         transform = fit_cached(before, after, method, exclude)
         matched = apply_cached(after, transform, strength)
 
+    if layout_choice == "auto":
+        composition = replace(composition, layout=resolve_layout(before, composition.aspect))
+
     tab_compare, tab_post = st.tabs(["Karşılaştırma", "Paylaşım görseli"])
 
     with tab_compare:
@@ -204,7 +213,8 @@ def main() -> None:
     with tab_post:
         preview = compose(before, matched, composition, logo, max_side=PREVIEW_MAX_SIDE)
         _, mid, _ = st.columns([1, 2, 1])
-        mid.image(preview, caption="Önizleme. İndirilen dosya tam çözünürlüktedir.")
+        note = f"{LAYOUT_LABELS[composition.layout]} düzen. " if layout_choice == "auto" else ""
+        mid.image(preview, caption=f"{note}Önizleme; indirilen dosya tam çözünürlüktedir.")
 
     st.subheader("İndir")
     request = RenderRequest(

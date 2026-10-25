@@ -17,6 +17,8 @@ AspectRatio = Literal["original", "1:1", "4:5", "9:16"]
 FitMode = Literal["pad", "crop"]
 LogoPosition = Literal["divider", "bottom_right", "top_right"]
 RGB = tuple[int, int, int]
+Align = tuple[float, float]
+CENTER: Align = (0.5, 0.5)
 
 ASPECT_VALUES: dict[str, float] = {"1:1": 1.0, "4:5": 4 / 5, "9:16": 9 / 16}
 MAX_CANVAS_SIDE = 6000
@@ -62,29 +64,42 @@ def compose(
     """Build the before/after canvas as an RGB image."""
     width, height = canvas_size(before, after, settings, max_side=max_side)
     gap = divider_width(width, height, settings)
+    # Padded photos hug the divider so the pair reads as one block.
     if settings.layout == "side_by_side":
         panel_w, panel_h = (width - gap) // 2, height
         origins = [(0, 0), (width - panel_w, 0)]
+        aligns: list[Align] = [(1.0, 0.5), (0.0, 0.5)]
     else:
         panel_w, panel_h = width, (height - gap) // 2
         origins = [(0, 0), (0, height - panel_h)]
+        aligns = [(0.5, 1.0), (0.5, 0.0)]
 
     canvas = Image.new("RGB", (width, height), settings.background)
-    panels = [
-        fit_to_panel(before, panel_w, panel_h, settings.fit, settings.background),
-        fit_to_panel(after, panel_w, panel_h, settings.fit, settings.background),
-    ]
-    for panel, origin in zip(panels, origins):
+    for image, origin, align in zip((before, after), origins, aligns):
+        panel = fit_to_panel(image, panel_w, panel_h, settings.fit, settings.background, align)
         canvas.paste(Image.fromarray(panel), origin)
 
     canvas = canvas.convert("RGBA")
     if settings.labels.enabled:
         texts = [settings.labels.before_text, settings.labels.after_text]
-        for text, origin in zip(texts, origins):
-            _draw_label(canvas, text, origin, settings.labels, min(width, height))
+        for text, image, origin, align in zip(texts, (before, after), origins, aligns):
+            x0, y0, x1, y1 = content_box(image, panel_w, panel_h, settings.fit, align)
+            _draw_label(canvas, text, (origin[0] + x0, origin[1] + y0), settings.labels, max(x1 - x0, y1 - y0))
     if logo is not None:
         _paste_logo(canvas, logo, settings)
     return canvas.convert("RGB")
+
+
+def resolve_layout(image: np.ndarray, aspect: AspectRatio) -> Layout:
+    """Choose the layout whose panels best match the photo's shape, wasting the least area."""
+    h, w = image.shape[:2]
+    photo_aspect = w / h
+    if aspect == "original":
+        return "stacked" if photo_aspect > 1 else "side_by_side"
+    ratio = ASPECT_VALUES[aspect]
+    side_mismatch = abs(np.log(photo_aspect / (ratio / 2)))
+    stacked_mismatch = abs(np.log(photo_aspect / (ratio * 2)))
+    return "stacked" if stacked_mismatch < side_mismatch else "side_by_side"
 
 
 def canvas_size(
@@ -117,29 +132,54 @@ def divider_width(width: int, height: int, settings: CompositionSettings) -> int
     return max(2, round(min(width, height) * settings.divider_percent / 100))
 
 
-def fit_to_panel(image: np.ndarray, width: int, height: int, fit: FitMode, background: RGB) -> np.ndarray:
-    """Resize ``image`` into a ``width`` x ``height`` panel by cropping or padding."""
-    h, w = image.shape[:2]
-    scale = max(width / w, height / h) if fit == "crop" else min(width / w, height / h)
-    new_w, new_h = max(1, round(w * scale)), max(1, round(h * scale))
-    interpolation = cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4
-    resized = cv2.resize(image, (new_w, new_h), interpolation=interpolation)
+def content_box(
+    image: np.ndarray,
+    width: int,
+    height: int,
+    fit: FitMode,
+    align: Align = CENTER,
+) -> tuple[int, int, int, int]:
+    """Return the (x0, y0, x1, y1) area the photo occupies inside a panel.
 
+    ``align`` places a padded photo along each axis: 0 start, 0.5 center, 1 end.
+    """
     if fit == "crop":
-        x0 = max(0, (new_w - width) // 2)
-        y0 = max(0, (new_h - height) // 2)
-        cropped = resized[y0 : y0 + height, x0 : x0 + width]
-        if cropped.shape[:2] == (height, width):
-            return np.ascontiguousarray(cropped)
-        resized = cropped
-        new_h, new_w = resized.shape[:2]
+        return 0, 0, width, height
+    h, w = image.shape[:2]
+    scale = min(width / w, height / h)
+    new_w, new_h = min(width, max(1, round(w * scale))), min(height, max(1, round(h * scale)))
+    x0 = round((width - new_w) * align[0])
+    y0 = round((height - new_h) * align[1])
+    return x0, y0, x0 + new_w, y0 + new_h
 
+
+def fit_to_panel(
+    image: np.ndarray,
+    width: int,
+    height: int,
+    fit: FitMode,
+    background: RGB,
+    align: Align = CENTER,
+) -> np.ndarray:
+    """Resize ``image`` into a ``width`` x ``height`` panel by center-cropping or padding."""
+    h, w = image.shape[:2]
+    if fit == "crop":
+        scale = max(width / w, height / h)
+        new_w, new_h = max(width, round(w * scale)), max(height, round(h * scale))
+        resized = cv2.resize(image, (new_w, new_h), interpolation=_interpolation(scale))
+        x0, y0 = (new_w - width) // 2, (new_h - height) // 2
+        return np.ascontiguousarray(resized[y0 : y0 + height, x0 : x0 + width])
+
+    x0, y0, x1, y1 = content_box(image, width, height, fit, align)
+    resized = cv2.resize(image, (x1 - x0, y1 - y0), interpolation=_interpolation((x1 - x0) / w))
     panel = np.empty((height, width, 3), dtype=np.uint8)
     panel[:] = background
-    x0 = (width - new_w) // 2
-    y0 = (height - new_h) // 2
-    panel[y0 : y0 + new_h, x0 : x0 + new_w] = resized[:height, :width]
+    panel[y0:y1, x0:x1] = resized
     return panel
+
+
+def _interpolation(scale: float) -> int:
+    return cv2.INTER_AREA if scale < 1 else cv2.INTER_LANCZOS4
 
 
 def to_png_bytes(image: Image.Image) -> bytes:
@@ -168,14 +208,15 @@ def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
         return ImageFont.load_default(size)
 
 
-def _draw_label(canvas: Image.Image, text: str, origin: tuple[int, int], style: LabelStyle, short_side: int) -> None:
+def _draw_label(canvas: Image.Image, text: str, origin: tuple[int, int], style: LabelStyle, photo_side: int) -> None:
+    """Draw ``text`` in the photo's top-left corner, sized relative to its long side."""
     text = text.strip()
     if not text:
         return
-    font_px = max(10, round(short_side * style.size_percent / 100))
+    font_px = max(10, round(photo_side * style.size_percent / 100))
     font = _font(font_px)
     pad_x, pad_y = round(font_px * 0.6), round(font_px * 0.35)
-    margin = round(short_side * 0.025)
+    margin = round(font_px * 0.6)
 
     overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)

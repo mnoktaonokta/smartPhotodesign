@@ -10,7 +10,9 @@ from core.image_composer import (
     LogoStyle,
     canvas_size,
     compose,
+    divider_width,
     fit_to_panel,
+    resolve_layout,
     to_jpeg_bytes,
     to_png_bytes,
     to_tiff_bytes,
@@ -101,6 +103,53 @@ def test_labels_are_drawn():
     plain = compose(photo, photo, CompositionSettings(aspect="original", labels=LabelStyle(enabled=False)))
     labeled = compose(photo, photo, CompositionSettings(aspect="original"))
     assert np.asarray(labeled).sum() > np.asarray(plain).sum()
+
+
+@pytest.mark.parametrize(
+    ("shape", "aspect", "expected"),
+    [
+        ((2000, 3000), "4:5", "stacked"),
+        ((2000, 3000), "9:16", "stacked"),
+        ((2000, 3000), "1:1", "stacked"),
+        ((3000, 2000), "1:1", "side_by_side"),
+        ((3000, 2000), "4:5", "side_by_side"),
+        ((2000, 3000), "original", "stacked"),
+        ((3000, 2000), "original", "side_by_side"),
+    ],
+)
+def test_resolve_layout_picks_least_padding(shape, aspect, expected):
+    assert resolve_layout(_solid(*shape, (0, 0, 0)), aspect) == expected
+
+
+def test_labels_sit_on_the_photo_not_the_padding():
+    landscape = _solid(200, 600, (0, 0, 0))
+    settings = CompositionSettings(
+        layout="side_by_side",
+        aspect="1:1",
+        fit="pad",
+        background=(255, 255, 255),
+        labels=LabelStyle(text_color=(255, 0, 0), background_opacity=0),
+        divider_percent=0,
+    )
+    image = np.asarray(compose(landscape, landscape, settings))
+    red = (image[..., 0] > 200) & (image[..., 1] < 80)
+    rows = np.nonzero(red.any(axis=1))[0]
+    photo_rows = np.nonzero((image[:, image.shape[1] // 4] < 50).all(axis=1))[0]
+    assert rows.size and photo_rows.size
+    assert photo_rows.min() <= rows.min() and rows.max() <= photo_rows.max()
+
+
+def test_padded_photos_meet_at_the_divider():
+    landscape = _solid(200, 600, (0, 0, 0))
+    settings = CompositionSettings(
+        layout="stacked", aspect="9:16", fit="pad", background=(255, 255, 255), labels=LabelStyle(enabled=False)
+    )
+    image = np.asarray(compose(landscape, landscape, settings))
+    dark_rows = np.nonzero((image[:, image.shape[1] // 2] < 50).all(axis=1))[0]
+    gap = divider_width(image.shape[1], image.shape[0], settings)
+    middle = image.shape[0] // 2
+    assert dark_rows.min() > 0 and dark_rows.max() < image.shape[0] - 1
+    assert np.any(np.abs(dark_rows - middle) <= gap)
 
 
 def test_exports_round_trip():

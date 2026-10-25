@@ -1,6 +1,9 @@
 [server]
 maxUploadSize = 500
 
+[client]
+toolbarMode = "minimal"
+
 [browser]
 gatherUsageStats = false
 
