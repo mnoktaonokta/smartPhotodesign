@@ -184,6 +184,17 @@ def test_slider_frames_label_sides_and_shared_logo():
     np.testing.assert_array_equal(green, (after[..., 1] > 200) & (after[..., 0] < 80))
 
 
+def test_logo_can_be_wide():
+    photo = _solid(400, 600, (0, 0, 0))
+    settings = CompositionSettings(
+        aspect="4:5", fit="crop", labels=LabelStyle(enabled=False), logo=LogoStyle(position="bottom_right", width_percent=60, opacity=1)
+    )
+    logo = Image.new("RGBA", (300, 100), (0, 255, 0, 255))
+    frame = np.asarray(slider_frames(photo, photo, settings, logo)[0])
+    columns = np.nonzero(((frame[..., 1] > 200) & (frame[..., 0] < 80)).any(axis=0))[0]
+    assert columns.size == pytest.approx(1080 * 0.6, abs=2)
+
+
 def test_exports_round_trip():
     image = Image.fromarray(_solid(64, 96, (12, 34, 56)))
     for encoded, fmt in ((to_png_bytes(image), "PNG"), (to_jpeg_bytes(image), "JPEG"), (to_tiff_bytes(image), "TIFF")):

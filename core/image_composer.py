@@ -22,6 +22,7 @@ CENTER: Align = (0.5, 0.5)
 
 ASPECT_VALUES: dict[str, float] = {"1:1": 1.0, "4:5": 4 / 5, "9:16": 9 / 16}
 MAX_CANVAS_SIDE = 6000
+MAX_LOGO_HEIGHT_FRACTION = 0.5
 VIDEO_WIDTH = 1080
 VIDEO_MAX_HEIGHT = 1920
 FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
@@ -290,7 +291,7 @@ def _paste_logo(canvas: Image.Image, logo: Image.Image, position: str, style: Lo
     width, height = canvas.size
     target_w = max(1, round(width * style.width_percent / 100))
     target_h = max(1, round(logo.height * target_w / logo.width))
-    max_h = round(height * 0.3)
+    max_h = round(height * MAX_LOGO_HEIGHT_FRACTION)
     if target_h > max_h:
         target_w = max(1, round(target_w * max_h / target_h))
         target_h = max_h

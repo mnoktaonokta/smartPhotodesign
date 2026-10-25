@@ -49,6 +49,8 @@ WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 PREVIEW_MAX_SIDE = 3200
 SHARE_PREVIEW_MAX_SIDE = 1400
 MAX_STORED_IMAGES = 6
+MIN_LOGO_PERCENT = 5.0
+MAX_LOGO_PERCENT = 60.0
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
 MIME_TYPES = {"png": "image/png", "jpeg": "image/jpeg", "tiff": "image/tiff", "preview": "image/jpeg"}
@@ -244,7 +246,7 @@ def composition_from_json(data: dict[str, Any], before: np.ndarray) -> Compositi
         ),
         logo=LogoStyle(
             position=position,
-            width_percent=float(np.clip(logo.get("widthPercent", 18.0), 5.0, 40.0)),
+            width_percent=float(np.clip(logo.get("widthPercent", 18.0), MIN_LOGO_PERCENT, MAX_LOGO_PERCENT)),
             opacity=float(np.clip(logo.get("opacity", 0.9), 0.0, 1.0)),
         ),
     )

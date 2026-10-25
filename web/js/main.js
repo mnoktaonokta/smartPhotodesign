@@ -1123,7 +1123,7 @@ function sharePanel() {
         s.logo.position,
         (v) => update(() => (s.logo.position = v)),
       ),
-      sliderOf({ label: "Logo genişliği", min: 10, max: 30, step: 1, format: (v) => `%${v}` }, s.logo.widthPercent, 18, (v) => (s.logo.widthPercent = v)),
+      sliderOf({ label: "Logo genişliği", min: 5, max: 60, step: 1, format: (v) => `%${v}` }, s.logo.widthPercent, 18, (v) => (s.logo.widthPercent = v)),
       sliderOf({ label: "Logo opaklığı", min: 10, max: 100, step: 1, format: (v) => `%${v}` }, Math.round(s.logo.opacity * 100), 90, (v) => (s.logo.opacity = v / 100)),
     ),
     section(
