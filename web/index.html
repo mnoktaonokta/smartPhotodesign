@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Smart Photo Design</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Smart Photo Design</div>
+      <nav class="steps" aria-label="Adımlar">
+        <button type="button" data-tab="before"><span>1</span>Before</button>
+        <button type="button" data-tab="after"><span>2</span>After</button>
+        <button type="button" data-tab="compare"><span>3</span>Karşılaştır</button>
+        <button type="button" data-tab="share"><span>4</span>Paylaş</button>
+      </nav>
+      <div class="privacy">Fotoğraflar yalnız bu bilgisayarda işlenir</div>
+    </header>
+    <main class="workspace">
+      <div id="stage" class="stage is-empty">
+        <canvas id="gl"></canvas>
+        <canvas id="overlay"></canvas>
+        <img id="share-preview" alt="Paylaşım görseli önizlemesi" hidden />
+        <p id="empty-message" class="empty-message"></p>
+      </div>
+      <aside id="panel" class="panel" aria-label="Ayarlar"></aside>
+    </main>
+    <div id="busy" class="busy" hidden><div class="spinner"></div><span></span></div>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <input id="file-input" type="file" accept=".cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.raf,.jpg,.jpeg,.png" hidden />
+    <input id="logo-input" type="file" accept=".png,image/png" hidden />
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>
