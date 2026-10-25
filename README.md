@@ -1,11 +1,14 @@
 # Smart Photo Design
 
-Klinik before/after fotoğrafları için yerel çalışan renk eşleştirme ve paylaşım görseli aracı.
+Klinik before/after fotoğrafları için yerel çalışan, Lightroom benzeri düzenleme ve paylaşım görseli aracı.
 
-Referans (before) ve hedef (after) fotoğrafı yüklenir. After fotoğrafının renk ve parlaklığı CIE Lab
-uzayında referansa çekilir, yan yana veya alt alta bir sosyal medya görseli hazırlanır, BEFORE / AFTER
-yazısı ve klinik logosu eklenir. Fotoğraflar yalnız bu bilgisayarın belleğinde işlenir; diske veya dış
-bir servise gönderilmez.
+Before fotoğrafı kadrajlanır ve ışık/renk ayarları yapılır. After fotoğrafı açılınca Before'un ayarları ve
+kadrajı kopyalanır, ardından görünen alan analiz edilerek After Before'a eşleştirilir. Karşılaştırma
+beğenilirse paylaşım görseli hazırlanır. Fotoğraflar yalnız bu bilgisayarın belleğinde işlenir; diske veya
+dış bir servise gönderilmez.
+
+Uygulama yerel bir Python sunucusu (yalnız `127.0.0.1`) ve tarayıcıda çalışan bir WebGL arayüzünden oluşur.
+Windows ve macOS'ta aynı şekilde çalışır.
 
 ## Kurulum
 
@@ -20,52 +23,61 @@ pip install -r requirements.txt
 ## Çalıştırma
 
 ```bash
-streamlit run app.py
+python -m smartphoto
 ```
 
-Tarayıcıda `http://localhost:8501` açılır.
+Tarayıcıda `http://127.0.0.1:8765` kendiliğinden açılır. Farklı bir port için `--port 9000`, tarayıcıyı
+açmamak için `--no-browser` kullanılabilir. Chrome, Edge veya Safari'nin güncel sürümü önerilir.
+
+## Akış
+
+1. **Before:** Fotoğrafı açın (sürükle-bırak da olur).
+   - **Kadraj:** oran, yakınlaştırma (fare tekerleği imlecin olduğu yere yaklaşır), açı ve 90° döndürme.
+     Fotoğrafı sürükleyerek çerçeve içinde kaydırın.
+   - **Işık:** pozlama, kontrast, parlak alanlar, gölgeler, beyazlar, siyahlar.
+   - **Renk:** RAW'da Kelvin cinsinden sıcaklık ve renk tonu, JPEG'de göreli ölçek; canlılık, doygunluk.
+   - **Hazır ayarlar:** "Diş odaklı (3900 K, gölgeler −100)" hazır gelir. Kendi ayarınızı kaydedebilirsiniz
+     (tarayıcıda saklanır).
+   - **Doğrusal maske:** fotoğraf üzerinde sürükleyerek çizilir. Etki düz çizgide tam, kesikli çizgide
+     sıfırdır. Maskenin kendi pozlama, kontrast, parlak alan, gölge, sıcaklık, renk tonu ve doygunluk ayarı
+     vardır. En fazla 8 maske.
+2. **After:** Fotoğraf açılınca Before'un ışık/renk ayarları ve kadrajı kopyalanır, sonra otomatik eşleştirme
+   yapılır. **Eşleştirme gücü** (%0 yalnız kopyalanan ayarlar, %100 tam eşleşme) ve tüm ayarlar elle
+   değiştirilebilir. Kadrajı Before ile aynı bölgeye getirip **İlk fotoğrafla eşleştir**'e yeniden basın.
+3. **Karşılaştır:** kaydırmalı veya yan yana görünüm.
+4. **Paylaş:** otomatik, yan yana veya alt alta düzen; 4:5, 1:1, 9:16 veya orijinal oran; BEFORE / AFTER
+   yazısı ve logo. Paylaşım görseli PNG/JPEG, tek fotoğraf JPEG/TIFF olarak tam çözünürlükte indirilir.
+
+Eşleştirme, iki fotoğrafın çerçevede görünen alanının Lab parlaklık dağılımını (koyu, orta, açık tonlar) ve
+ortalama rengini ölçer; pozlama, parlak alanlar, gölgeler, sıcaklık ve renk tonu ayarlarını bunlar örtüşene
+kadar ayarlar. Siyah kontrastör fonu ve parlama noktaları hesaba katılmaz. Sonuç gerçek kaydırıcı
+değerleridir, bu yüzden üzerine elle ince ayar yapılabilir.
+
+Çıktılar sosyal medya içindir; klinik teşhis kaydının yerine geçmez.
 
 ## Desteklenen dosyalar
 
-- RAW: CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF (LibRaw ile)
+- RAW: CR2, CR3, NEF, ARW, DNG, ORF, RW2, RAF (LibRaw ile, doğrusal kamera verisi üzerinden)
 - Standart: JPG, PNG
 - Logo: şeffaf PNG
-
-## Renk eşleştirme
-
-- **Reinhard (önerilen):** after fotoğrafının L, a, b kanallarının ortalama ve standart sapması
-  referansınkine eşitlenir. Global ve öngörülebilir bir düzeltmedir, dokuyu bozmaz.
-- **Histogram eşleme:** kanal dağılımları bire bir eşlenir. Daha agresiftir.
-- **Fon ve parlamaları hesaba katma:** siyah kontrastör fonu, çok koyu gölgeler ve diş üstündeki
-  parlama noktaları istatistiğe girmez.
-- **Eşleştirme gücü:** sonucu orijinal after ile karıştırır (%0 orijinal, %100 tam eşleşme).
-
-## Paylaşım görseli
-
-- **Düzen:** Otomatik (varsayılan), yan yana veya alt alta. Otomatik, fotoğrafa en az boşluk bırakan
-  düzeni seçer; yatay ağız içi fotoğraflar 4:5 ve 9:16'da alt alta dizilir.
-- **Oran:** 4:5, 1:1, 9:16 veya orijinal. Dolgu modunda fotoğraflar ayraç çizgisine yaslanır.
-- **Yazı ve logo:** BEFORE / AFTER fotoğrafın sol üst köşesine yazılır. Logo ayraçta, sağ altta veya
-  sağ üstte durur.
-
-Önizleme 1600 piksel üzerinden çalışır. İndirilen dosyalar aynı katsayılarla tam çözünürlükte üretilir.
-
-Çıktılar sosyal medya içindir; klinik teşhis kaydının yerine geçmez.
 
 ## Geliştirme
 
 ```bash
 pip install -r requirements-dev.txt
 pytest
+node --test tests/js/*.test.mjs
 ```
 
 | Dosya | Görev |
 | --- | --- |
-| `app.py` | Streamlit arayüzü |
-| `core/image_loader.py` | RAW ve JPG/PNG çözümleme |
-| `core/color_engine.py` | Lab istatistikleri, Reinhard ve histogram eşleme |
-| `core/image_composer.py` | Kadraj, yazı, logo ve dışa aktarma |
-| `core/pipeline.py` | İndirmeler için tam çözünürlük üretimi |
-| `ui/comparison_slider.py` | Çevrimdışı kayan karşılaştırma |
+| `smartphoto/server.py` | Yerel FastAPI sunucusu: çözümleme, paylaşım görseli, kodlama |
+| `core/image_loader.py` | RAW'ı doğrusal kamera uzayında, JPG/PNG'yi doğrusal sRGB olarak açma |
+| `core/image_composer.py` | Düzen, yazı, logo ve dosya kodlama |
+| `web/js/main.js` | Arayüz durumu, paneller, fare etkileşimi, dışa aktarma |
+| `web/js/shaders.js`, `renderer.js` | WebGL2 işleme hattı (beyaz dengesi, ton, maskeler) |
+| `web/js/color.js` | Kelvin/renk tonu ve beyaz dengesi hesapları |
+| `web/js/geometry.js` | Kadraj, döndürme, yakınlaştırma ve kaydırma |
+| `web/js/match.js` | Fotoğraf ölçümü ve ayar eşleştirme çözücüsü |
 
 Etiket fontu DejaVu Sans Bold'dur (`assets/fonts/DejaVu-LICENSE.txt`).
