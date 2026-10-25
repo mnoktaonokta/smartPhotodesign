@@ -40,6 +40,14 @@ Tarayıcıda `http://localhost:8501` açılır.
   parlama noktaları istatistiğe girmez.
 - **Eşleştirme gücü:** sonucu orijinal after ile karıştırır (%0 orijinal, %100 tam eşleşme).
 
+## Paylaşım görseli
+
+- **Düzen:** Otomatik (varsayılan), yan yana veya alt alta. Otomatik, fotoğrafa en az boşluk bırakan
+  düzeni seçer; yatay ağız içi fotoğraflar 4:5 ve 9:16'da alt alta dizilir.
+- **Oran:** 4:5, 1:1, 9:16 veya orijinal. Dolgu modunda fotoğraflar ayraç çizgisine yaslanır.
+- **Yazı ve logo:** BEFORE / AFTER fotoğrafın sol üst köşesine yazılır. Logo ayraçta, sağ altta veya
+  sağ üstte durur.
+
 Önizleme 1600 piksel üzerinden çalışır. İndirilen dosyalar aynı katsayılarla tam çözünürlükte üretilir.
 
 Çıktılar sosyal medya içindir; klinik teşhis kaydının yerine geçmez.
