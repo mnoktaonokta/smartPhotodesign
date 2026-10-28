@@ -74,7 +74,6 @@ export function brushStamp(bitmap, width, height, nx, ny, radiusNorm, strength =
 
 /**
  * Auto-select bright, low-saturation regions typical of teeth against a dark contrastor.
- * Works on linear float16 RGB preview pixels.
  */
 export function selectTeethMask(pixels, imageW, imageH, mapW, mapH) {
   const bitmap = new Uint8Array(mapW * mapH);
@@ -92,7 +91,6 @@ export function selectTeethMask(pixels, imageW, imageH, mapW, mapH) {
       const mx = Math.max(r, g, b);
       const mn = Math.min(r, g, b);
       const sat = mx > 1e-6 ? (mx - mn) / mx : 0;
-      // Prefer bright, not-too-saturated, somewhat central pixels.
       const cx = x / Math.max(1, mapW - 1) - 0.5;
       const cy = y / Math.max(1, mapH - 1) - 0.5;
       const center = Math.exp(-(cx * cx * 2.2 + cy * cy * 1.4));
@@ -102,7 +100,6 @@ export function selectTeethMask(pixels, imageW, imageH, mapW, mapH) {
     }
   }
   const mean = sum / luma.length;
-  // Threshold a bit above the mean; dental photos with black background push mean down.
   const thr = Math.max(0.08, mean * 1.35);
   for (let i = 0; i < luma.length; i++) {
     bitmap[i] = luma[i] > thr ? 255 : 0;
@@ -165,7 +162,6 @@ function softDilateErode(bitmap, w, h) {
       out[y * w + x] = m;
     }
   }
-  // Soften edges
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       let s = 0;
@@ -178,56 +174,152 @@ function softDilateErode(bitmap, w, h) {
   return bitmap;
 }
 
-/** Heal: blend destination with a ring average around the brush (texture-aware soft fill). */
+function sampleRgb(pixels, width, height, x, y) {
+  const ix = Math.max(0, Math.min(width - 1, Math.round(x)));
+  const iy = Math.max(0, Math.min(height - 1, Math.round(y)));
+  const i = (iy * width + ix) * 3;
+  return [halfToFloat(pixels[i]), halfToFloat(pixels[i + 1]), halfToFloat(pixels[i + 2])];
+}
+
+function luma3(r, g, b) {
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/**
+ * Content-aware heal: finds a nearby texture patch that matches the brush edge,
+ * then copies it with soft blending and lighting adaptation.
+ * Avoids flat "skin paint" by excluding bright outliers (teeth) when healing gum.
+ */
 export function healStamp(pixels, width, height, nx, ny, radiusNorm) {
   const cx = nx * (width - 1);
   const cy = ny * (height - 1);
-  const radius = Math.max(2, radiusNorm * Math.min(width, height));
-  const inner = radius * 0.55;
-  const outer = radius * 1.35;
-  let sr = 0;
-  let sg = 0;
-  let sb = 0;
-  let sw = 0;
-  const x0 = Math.max(0, Math.floor(cx - outer - 1));
-  const x1 = Math.min(width - 1, Math.ceil(cx + outer + 1));
-  const y0 = Math.max(0, Math.floor(cy - outer - 1));
-  const y1 = Math.min(height - 1, Math.ceil(cy + outer + 1));
-  for (let y = y0; y <= y1; y++) {
-    for (let x = x0; x <= x1; x++) {
-      const d = Math.hypot(x - cx, y - cy);
-      if (d < inner || d > outer) continue;
-      const w = 1 - Math.abs(d - (inner + outer) / 2) / ((outer - inner) / 2 + 1e-6);
-      const i = (y * width + x) * 3;
-      sr += halfToFloat(pixels[i]) * w;
-      sg += halfToFloat(pixels[i + 1]) * w;
-      sb += halfToFloat(pixels[i + 2]) * w;
-      sw += w;
+  const radius = Math.max(3, radiusNorm * Math.min(width, height));
+  const rInner = radius * 0.85;
+  const rOuter = radius * 2.4;
+
+  // Edge samples around the brush — used to score candidate sources.
+  const edge = [];
+  for (let a = 0; a < 16; a++) {
+    const ang = (a / 16) * Math.PI * 2;
+    const ex = cx + Math.cos(ang) * radius;
+    const ey = cy + Math.sin(ang) * radius;
+    if (ex < 1 || ey < 1 || ex > width - 2 || ey > height - 2) continue;
+    const rgb = sampleRgb(pixels, width, height, ex, ey);
+    edge.push({ x: ex, y: ey, rgb, lum: luma3(...rgb) });
+  }
+  if (!edge.length) return;
+
+  // Median edge luminance — heal toward similar tissue, not teeth.
+  const ys = edge.map((e) => e.lum).sort((a, b) => a - b);
+  const targetY = ys[Math.floor(ys.length / 2)];
+
+  // Try candidate source offsets around the brush.
+  let bestOx = 0;
+  let bestOy = -radius * 1.6;
+  let bestScore = Infinity;
+  const distances = [radius * 1.35, radius * 1.85, radius * 2.35];
+  for (const dist of distances) {
+    for (let a = 0; a < 24; a++) {
+      const ang = (a / 24) * Math.PI * 2;
+      const ox = Math.cos(ang) * dist;
+      const oy = Math.sin(ang) * dist;
+      let score = 0;
+      let n = 0;
+      let brightPenalty = 0;
+      for (const e of edge) {
+        const sx = e.x + ox;
+        const sy = e.y + oy;
+        if (sx < 1 || sy < 1 || sx > width - 2 || sy > height - 2) {
+          score += 4;
+          n++;
+          continue;
+        }
+        // Source must not land inside the brush.
+        if (Math.hypot(sx - cx, sy - cy) < rInner) {
+          score += 3;
+          n++;
+          continue;
+        }
+        const rgb = sampleRgb(pixels, width, height, sx, sy);
+        const ly = luma3(...rgb);
+        // Prefer similar brightness to the local edge (gum-to-gum, not tooth-to-gum).
+        score += Math.abs(ly - e.lum) * 2.2;
+        score += Math.abs(rgb[0] - e.rgb[0]) + Math.abs(rgb[1] - e.rgb[1]) + Math.abs(rgb[2] - e.rgb[2]);
+        if (Math.abs(ly - targetY) > 0.35) brightPenalty += 1.5;
+        n++;
+      }
+      if (!n) continue;
+      score = score / n + brightPenalty / n;
+      if (score < bestScore) {
+        bestScore = score;
+        bestOx = ox;
+        bestOy = oy;
+      }
     }
   }
-  if (sw < 1e-6) return;
-  sr /= sw;
-  sg /= sw;
-  sb /= sw;
+
+  // Lighting adaptation: match mean of source patch edge to destination edge.
+  let dr = 0;
+  let dg = 0;
+  let db = 0;
+  let dn = 0;
+  for (const e of edge) {
+    const sx = e.x + bestOx;
+    const sy = e.y + bestOy;
+    if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+    const rgb = sampleRgb(pixels, width, height, sx, sy);
+    dr += e.rgb[0] - rgb[0];
+    dg += e.rgb[1] - rgb[1];
+    db += e.rgb[2] - rgb[2];
+    dn++;
+  }
+  if (dn) {
+    dr /= dn;
+    dg /= dn;
+    db /= dn;
+  }
+
   const r2 = radius * radius;
-  for (let y = Math.max(0, Math.floor(cy - radius - 1)); y <= Math.min(height - 1, Math.ceil(cy + radius + 1)); y++) {
-    for (let x = Math.max(0, Math.floor(cx - radius - 1)); x <= Math.min(width - 1, Math.ceil(cx + radius + 1)); x++) {
+  const x0 = Math.max(0, Math.floor(cx - radius - 1));
+  const x1 = Math.min(width - 1, Math.ceil(cx + radius + 1));
+  const y0 = Math.max(0, Math.floor(cy - radius - 1));
+  const y1 = Math.min(height - 1, Math.ceil(cy + radius + 1));
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
       const dx = x - cx;
       const dy = y - cy;
       const d2 = dx * dx + dy * dy;
       if (d2 > r2) continue;
       const fall = 1 - Math.sqrt(d2) / radius;
       const soft = fall * fall * (3 - 2 * fall);
-      const i = (y * width + x) * 3;
-      const or = halfToFloat(pixels[i]);
-      const og = halfToFloat(pixels[i + 1]);
-      const ob = halfToFloat(pixels[i + 2]);
-      // Mix toward sampled surround while keeping local high-frequency from a mild blend.
-      pixels[i] = floatToHalf(or * (1 - soft * 0.85) + sr * soft * 0.85);
-      pixels[i + 1] = floatToHalf(og * (1 - soft * 0.85) + sg * soft * 0.85);
-      pixels[i + 2] = floatToHalf(ob * (1 - soft * 0.85) + sb * soft * 0.85);
+
+      const sx = Math.round(x + bestOx);
+      const sy = Math.round(y + bestOy);
+      if (sx < 0 || sy < 0 || sx >= width || sy >= height) continue;
+      // Don't sample from inside the heal region itself.
+      if (Math.hypot(sx - cx, sy - cy) < rInner * 0.7) continue;
+
+      const di = (y * width + x) * 3;
+      const si = (sy * width + sx) * 3;
+      const or = halfToFloat(pixels[di]);
+      const og = halfToFloat(pixels[di + 1]);
+      const ob = halfToFloat(pixels[di + 2]);
+      let sr = halfToFloat(pixels[si]) + dr;
+      let sg = halfToFloat(pixels[si + 1]) + dg;
+      let sb = halfToFloat(pixels[si + 2]) + db;
+      sr = Math.max(0, sr);
+      sg = Math.max(0, sg);
+      sb = Math.max(0, sb);
+
+      // Preserve a bit of destination high-frequency so it doesn't look stamped.
+      const mix = soft * 0.92;
+      pixels[di] = floatToHalf(or * (1 - mix) + sr * mix);
+      pixels[di + 1] = floatToHalf(og * (1 - mix) + sg * mix);
+      pixels[di + 2] = floatToHalf(ob * (1 - mix) + sb * mix);
     }
   }
+  void rOuter;
 }
 
 /** Clone stamp: copy from source offset with soft brush. */
@@ -268,7 +360,6 @@ export function clonePixels(pixels) {
   return new Uint16Array(pixels);
 }
 
-// Float16 helpers (IEEE 754 binary16).
 export function halfToFloat(h) {
   const s = (h & 0x8000) >> 15;
   const e = (h & 0x7c00) >> 10;

@@ -22,16 +22,19 @@
     </header>
     <main class="workspace">
       <div id="stage" class="stage is-empty" data-tab="edit">
-        <canvas id="gl"></canvas>
-        <canvas id="overlay"></canvas>
-        <button type="button" class="frame-clear" id="clear-before" hidden title="Before fotoğrafını kaldır" aria-label="Before kaldır">×</button>
-        <button type="button" class="frame-clear" id="clear-after" hidden title="After fotoğrafını kaldır" aria-label="After kaldır">×</button>
-        <div id="slot-labels" class="slot-labels" hidden>
-          <span data-slot="before">BEFORE</span>
-          <span data-slot="after">AFTER</span>
+        <div id="stage-toolbar" class="stage-toolbar" hidden></div>
+        <div class="stage-canvas-wrap">
+          <canvas id="gl"></canvas>
+          <canvas id="overlay"></canvas>
+          <button type="button" class="frame-clear" id="clear-before" hidden title="Before fotoğrafını kaldır" aria-label="Before kaldır">×</button>
+          <button type="button" class="frame-clear" id="clear-after" hidden title="After fotoğrafını kaldır" aria-label="After kaldır">×</button>
+          <div id="slot-labels" class="slot-labels" hidden>
+            <span data-slot="before"><em>BEFORE</em></span>
+            <span data-slot="after"><em>AFTER</em></span>
+          </div>
+          <img id="share-preview" alt="Paylaşım görseli önizlemesi" hidden />
+          <p id="empty-message" class="empty-message">Sola Before, sağa After fotoğrafını sürükleyin veya tıklayın.</p>
         </div>
-        <img id="share-preview" alt="Paylaşım görseli önizlemesi" hidden />
-        <p id="empty-message" class="empty-message">Sola Before, sağa After fotoğrafını sürükleyin veya tıklayın.</p>
       </div>
       <aside id="panel" class="panel" aria-label="Ayarlar"></aside>
     </main>

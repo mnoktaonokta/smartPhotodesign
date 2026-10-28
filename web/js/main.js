@@ -111,6 +111,21 @@ const clearBefore = document.getElementById("clear-before");
 const clearAfter = document.getElementById("clear-after");
 const slotLabels = document.getElementById("slot-labels");
 const editActions = document.getElementById("edit-actions");
+const stageToolbar = document.getElementById("stage-toolbar");
+
+const ICONS = {
+  pan: '<svg viewBox="0 0 24 24"><path d="M8 12h8M12 8v8"/><circle cx="12" cy="12" r="7"/></svg>',
+  linear: '<svg viewBox="0 0 24 24"><path d="M4 18L20 6"/><path d="M4 14l4 4M16 6l4 4"/></svg>',
+  radial: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="7"/></svg>',
+  brush: '<svg viewBox="0 0 24 24"><path d="M5 19c2 0 3-1 4-3l8-8 3 3-8 8c-2 1-3 2-7 0z"/><path d="M14 7l3 3"/></svg>',
+  erase: '<svg viewBox="0 0 24 24"><path d="M7 17l7-7 3 3-7 7H7v-3z"/><path d="M14 7l3 3"/></svg>',
+  teeth: '<svg viewBox="0 0 24 24"><path d="M6 9c0-2 2-4 6-4s6 2 6 4v5c0 2-1 4-3 4s-2-2-3-2-1 2-3 2-3-2-3-4V9z"/></svg>',
+  subject: '<svg viewBox="0 0 24 24"><path d="M8 4H4v4M16 4h4v4M8 20H4v-4M16 20h4v-4"/><circle cx="12" cy="12" r="4"/></svg>',
+  invert: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16z" fill="currentColor" stroke="none"/></svg>',
+  trash: '<svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M8 7l1 12h6l1-12"/></svg>',
+  heal: '<svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/><circle cx="12" cy="12" r="8"/></svg>',
+  clone: '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="10" height="10" rx="1"/><path d="M6 16V6h10"/></svg>',
+};
 
 let renderer;
 let controls = {};
@@ -495,6 +510,7 @@ function draw() {
   positionClearButtons(dpr);
   updateSlotLabels(dpr);
   drawCloneSource(dpr);
+  renderStageToolbar();
 }
 
 function drawCloneSource(dpr) {
@@ -522,13 +538,22 @@ function drawEmptyFrame(L, dpr, slot, active) {
   const ctx = overlayCtx;
   const box = frameBox(L);
   ctx.save();
-  ctx.strokeStyle = active ? "rgba(43,179,163,0.9)" : "rgba(255,255,255,0.35)";
+  if (active) {
+    ctx.strokeStyle = "rgba(43,179,163,0.35)";
+    ctx.lineWidth = 10 * dpr;
+    ctx.setLineDash([]);
+    ctx.strokeRect(box.x - 2 * dpr, box.y - 2 * dpr, box.w + 4 * dpr, box.h + 4 * dpr);
+    ctx.strokeStyle = "rgba(43,179,163,1)";
+    ctx.lineWidth = 3 * dpr;
+  } else {
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.lineWidth = 1 * dpr;
+  }
   ctx.setLineDash([8 * dpr, 6 * dpr]);
-  ctx.lineWidth = (active ? 2 : 1) * dpr;
   ctx.strokeRect(box.x, box.y, box.w, box.h);
   ctx.setLineDash([]);
-  ctx.fillStyle = "rgba(255,255,255,0.55)";
-  ctx.font = `500 ${13 * dpr}px system-ui, sans-serif`;
+  ctx.fillStyle = active ? "rgba(43,179,163,0.9)" : "rgba(255,255,255,0.45)";
+  ctx.font = `600 ${13 * dpr}px system-ui, sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   ctx.fillText(`${SLOTS[slot]} yükle`, L.cx, L.cy);
@@ -539,9 +564,23 @@ function drawFrameOverlay(L, dpr, thirds, active) {
   const ctx = overlayCtx;
   const x = L.cx - L.rw / 2;
   const y = L.cy - L.rh / 2;
-  ctx.strokeStyle = active ? "rgba(43,179,163,0.95)" : "rgba(255,255,255,0.7)";
-  ctx.lineWidth = (active ? 2 : 1) * dpr;
+  if (!active) {
+    // Dim inactive photo so the active side reads clearly.
+    ctx.fillStyle = "rgba(10, 10, 12, 0.38)";
+    ctx.fillRect(x, y, L.rw, L.rh);
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.lineWidth = 1 * dpr;
+    ctx.strokeRect(x, y, L.rw, L.rh);
+    return;
+  }
+  ctx.save();
+  ctx.strokeStyle = "rgba(43,179,163,0.35)";
+  ctx.lineWidth = 10 * dpr;
+  ctx.strokeRect(x - 2 * dpr, y - 2 * dpr, L.rw + 4 * dpr, L.rh + 4 * dpr);
+  ctx.strokeStyle = "rgba(43,179,163,1)";
+  ctx.lineWidth = 3 * dpr;
   ctx.strokeRect(x, y, L.rw, L.rh);
+  ctx.restore();
   if (!thirds) return;
   ctx.strokeStyle = "rgba(255,255,255,0.35)";
   ctx.lineWidth = 1 * dpr;
@@ -974,6 +1013,7 @@ function renderPanel() {
   empty.textContent = "Sola Before, sağa After fotoğrafını sürükleyin veya çerçeveye tıklayın.";
 
   panel.replaceChildren(...(state.tab === "share" ? sharePanel() : editPanel()));
+  renderStageToolbar();
 }
 
 function syncControls() {
@@ -998,88 +1038,160 @@ function editPanel() {
       el("button", { type: "button", class: `chip${slot === "before" ? " is-active" : ""}`, onclick: () => setActiveSlot("before") }, "Before"),
       el("button", { type: "button", class: `chip${slot === "after" ? " is-active" : ""}`, onclick: () => setActiveSlot("after") }, "After"),
     ),
+    el("p", { class: "hint" }, slot === "before" ? "Şu an Before düzenleniyor (sol çerçeve)." : "Şu an After düzenleniyor (sağ çerçeve)."),
     photo
       ? el("p", { class: "file-meta" }, el("strong", {}, photo.meta.name), el("br"), `${photo.meta.isRaw ? "RAW" : "JPEG/PNG"} · ${photo.meta.fullWidth}×${photo.meta.fullHeight}`)
       : el("p", { class: "hint" }, `${SLOTS[slot]} için fotoğraf yükleyin. Çerçeveye tıklayın veya sürükleyip bırakın.`),
     el("button", { type: "button", class: "button primary wide", onclick: () => pickFile(slot) }, photo ? "Başka fotoğraf aç" : `${SLOTS[slot]} fotoğrafını aç`),
   );
-  if (!photo) return [head, section("İpucu", el("p", { class: "hint" }, "After yüklenince Before ayarları kopyalanır ve renkler otomatik eşleştirilir. İki fotoğrafı aynı anda görüp soldakine/sağdakine tıklayarak düzenlersiniz."))];
+  if (!photo) return [head, section("İpucu", el("p", { class: "hint" }, "Üstteki araç çubuğundan maske ve rötüş araçlarını seçin. After yüklenince Before ayarları kopyalanır ve renkler eşleştirilir."))];
 
   const sections = [head];
   if (slot === "after") sections.push(matchSection(photo));
-  sections.push(toolsSection(photo), cropSection(photo), lightSection(photo), colorSection(photo), presetSection(photo), maskSection(photo));
+  sections.push(cropSection(photo), lightSection(photo), colorSection(photo), presetSection(photo), maskSection(photo));
   return sections;
 }
 
-function toolsSection(photo) {
-  const tools = [
-    ["pan", "Kaydır"],
-    ["linear", "Doğrusal maske"],
-    ["radial", "Radyal maske"],
-    ["brush", "Fırça maske"],
-    ["erase", "Maske silgi"],
-    ["subject", "Nesne seç"],
-    ["heal", "İyileştir"],
-    ["clone", "Klon / rötüş"],
-  ];
-  return section(
-    "Araçlar",
+function tbButton(id, label, icon, { active = false, disabled = false, armed = false, onClick } = {}) {
+  return el(
+    "button",
+    {
+      type: "button",
+      class: `tb-btn${active ? " is-active" : ""}${armed ? " is-armed" : ""}`,
+      disabled,
+      title: label,
+      onclick: onClick,
+      html: `${icon}<span>${label}</span>`,
+    },
+  );
+}
+
+function selectTool(id) {
+  state.tool = id;
+  if (id === "clone") state.cloneSource = null;
+  if (id === "subject") showToast("Diş veya nesneye tıklayın.");
+  if (id === "clone") showToast("İlk tık kaynak seçer, sonraki tıklar boyar.");
+  if (id === "heal") showToast("Diş eti çizgisine ince fırçayla sürün — çevre dokudan yamar.");
+  renderStageToolbar();
+  renderPanel();
+  requestDraw();
+}
+
+function autoSelectTeeth() {
+  const photo = activePhoto();
+  if (!photo) return showToast("Önce bir fotoğraf seçin.", true);
+  if (photo.masks.length >= MAX_MASKS) return showToast("En fazla 8 maske.", true);
+  pushHistory();
+  const mask = maskDefaults(MASK_BRUSH);
+  mask.bitmap = selectTeethMask(photo.pixels, photo.meta.width, photo.meta.height, photo.maskMap.width, photo.maskMap.height);
+  photo.masks.push(mask);
+  photo.selectedMask = photo.masks.length - 1;
+  photo.showMask = false;
+  syncMaskTextures(photo);
+  renderStageToolbar();
+  renderPanel();
+  requestDraw();
+  showToast("Dişler seçildi. Invert ile dışını düzenleyebilirsiniz.");
+}
+
+function toggleInvert() {
+  const photo = activePhoto();
+  const mask = photo?.masks[photo.selectedMask];
+  if (!mask) return showToast("Önce bir maske seçin veya oluşturun.", true);
+  pushHistory();
+  mask.invert = !mask.invert;
+  renderStageToolbar();
+  renderPanel();
+  requestDraw();
+  showToast(mask.invert ? "Invert açık: ayarlar seçimin dışına uygulanır." : "Invert kapalı: ayarlar seçime uygulanır.");
+}
+
+function deleteSelectedMask() {
+  const photo = activePhoto();
+  if (!photo || photo.selectedMask < 0) return showToast("Silinecek maske yok.", true);
+  pushHistory();
+  photo.masks.splice(photo.selectedMask, 1);
+  photo.selectedMask = photo.masks.length - 1;
+  syncMaskTextures(photo);
+  renderStageToolbar();
+  renderPanel();
+  requestDraw();
+}
+
+function renderStageToolbar() {
+  if (!stageToolbar) return;
+  const editing = state.tab === "edit";
+  stageToolbar.hidden = !editing;
+  if (!editing) return;
+  const photo = activePhoto();
+  const mask = photo?.masks[photo.selectedMask];
+  const hasPhoto = !!photo;
+  const sizeTools = ["brush", "erase", "heal", "clone"].includes(state.tool);
+
+  stageToolbar.replaceChildren(
     el(
       "div",
-      { class: "tool-list" },
-      tools.map(([id, label]) =>
-        el(
-          "button",
-          {
-            type: "button",
-            class: `chip${state.tool === id ? " is-active" : ""}`,
-            onclick: () => {
-              state.tool = id;
-              if (id === "clone") state.cloneSource = null;
-              if (id === "subject") showToast("Diş veya nesneye tıklayın.");
-              if (id === "clone") showToast("İlk tık kaynak seçer, sonraki tıklar boyar.");
-              if (id === "heal") showToast("Diş eti çizgisi vb. üzerinde sürükleyin.");
-              if (id === "linear" || id === "radial" || id === "brush") showToast("Araç seçili kalır; bitince Kaydır’a dönün.");
-              renderPanel();
-              requestDraw();
-            },
+      { class: "tb-group" },
+      el("span", { class: "tb-label" }, "Gezin"),
+      tbButton("pan", "Kaydır", ICONS.pan, { active: state.tool === "pan", onClick: () => selectTool("pan") }),
+    ),
+    el(
+      "div",
+      { class: "tb-group" },
+      el("span", { class: "tb-label" }, "Maske"),
+      tbButton("linear", "Doğrusal", ICONS.linear, { active: state.tool === "linear", disabled: !hasPhoto, onClick: () => selectTool("linear") }),
+      tbButton("radial", "Radyal", ICONS.radial, { active: state.tool === "radial", disabled: !hasPhoto, onClick: () => selectTool("radial") }),
+      tbButton("brush", "Fırça", ICONS.brush, { active: state.tool === "brush", disabled: !hasPhoto, onClick: () => selectTool("brush") }),
+      tbButton("erase", "Silgi", ICONS.erase, { active: state.tool === "erase", disabled: !hasPhoto, onClick: () => selectTool("erase") }),
+    ),
+    el(
+      "div",
+      { class: "tb-group" },
+      el("span", { class: "tb-label" }, "Seçim"),
+      tbButton("teeth", "Dişler", ICONS.teeth, { disabled: !hasPhoto, onClick: autoSelectTeeth }),
+      tbButton("subject", "Nesne", ICONS.subject, { active: state.tool === "subject", disabled: !hasPhoto, onClick: () => selectTool("subject") }),
+      tbButton("invert", "Invert", ICONS.invert, { armed: !!mask?.invert, disabled: !mask, onClick: toggleInvert }),
+      tbButton("trash", "Sil", ICONS.trash, { disabled: !mask, onClick: deleteSelectedMask }),
+      el(
+        "label",
+        { class: "tb-check", title: "Maske alanını kırmızı göster" },
+        el("input", {
+          type: "checkbox",
+          checked: !!photo?.showMask,
+          disabled: !mask,
+          onchange: (e) => {
+            if (!photo) return;
+            photo.showMask = e.target.checked;
+            requestDraw();
           },
-          label,
-        ),
+        }),
+        "Kırmızı önizleme",
       ),
     ),
-    ["brush", "erase", "heal", "clone"].includes(state.tool)
-      ? slider(
-          { label: "Fırça boyutu", min: 0.01, max: 0.15, step: 0.005, format: (v) => `${Math.round(v * 100)}` },
-          state.brushSize,
-          0.04,
-          (v) => {
-            state.brushSize = v;
-          },
-        ).node
-      : null,
     el(
-      "button",
-      {
-        type: "button",
-        class: "button wide",
-        onclick: () => {
-          if (photo.masks.length >= MAX_MASKS) return showToast("En fazla 8 maske.", true);
-          pushHistory();
-          const mask = maskDefaults(MASK_BRUSH);
-          mask.bitmap = selectTeethMask(photo.pixels, photo.meta.width, photo.meta.height, photo.maskMap.width, photo.maskMap.height);
-          photo.masks.push(mask);
-          photo.selectedMask = photo.masks.length - 1;
-          photo.showMask = false;
-          syncMaskTextures(photo);
-          renderPanel();
-          requestDraw();
-          showToast("Dişler seçildi. Aşağıdaki Invert ile dışını düzenleyin.");
-        },
-      },
-      "Dişleri otomatik seç",
+      "div",
+      { class: "tb-group" },
+      el("span", { class: "tb-label" }, "Rötüş"),
+      tbButton("heal", "İyileştir", ICONS.heal, { active: state.tool === "heal", disabled: !hasPhoto, onClick: () => selectTool("heal") }),
+      tbButton("clone", "Klon", ICONS.clone, { active: state.tool === "clone", disabled: !hasPhoto, onClick: () => selectTool("clone") }),
+      sizeTools
+        ? el(
+            "label",
+            { class: "tb-size" },
+            "Boyut",
+            el("input", {
+              type: "range",
+              min: "0.01",
+              max: "0.12",
+              step: "0.005",
+              value: String(state.brushSize),
+              oninput: (e) => {
+                state.brushSize = Number(e.target.value);
+              },
+            }),
+          )
+        : null,
     ),
-    el("p", { class: "hint" }, "Klon: ilk tık kaynak, sonraki tıklar boyar (Alt+tık yeni kaynak). İyileştir: çevredeki dokuya yumuşatır. Maske seçiliyken Invert ve ışık ayarları Maskeler bölümündedir."),
   );
 }
 
@@ -1315,34 +1427,22 @@ function maskSection(photo) {
           class: `chip${i === photo.selectedMask ? " is-active" : ""}`,
           onclick: () => {
             photo.selectedMask = i;
+            renderStageToolbar();
             renderPanel();
             requestDraw();
           },
         },
-        `${MASK_TYPE_LABELS[mask.type] || "Maske"} ${i + 1}`,
+        `${MASK_TYPE_LABELS[mask.type] || "Maske"} ${i + 1}${mask.invert ? " ⌽" : ""}`,
       ),
     ),
   );
   const mask = photo.masks[photo.selectedMask];
-  const children = [photo.masks.length ? list : el("p", { class: "hint" }, "Araçlardan maske ekleyin.")];
+  const children = [
+    photo.masks.length ? list : el("p", { class: "hint" }, "Üst araç çubuğundan maske çizin veya Dişler / Nesne ile seçin."),
+  ];
   if (mask) {
     children.push(
-      el(
-        "button",
-        {
-          type: "button",
-          class: `button wide${mask.invert ? " is-armed" : ""}`,
-          onclick: () => {
-            pushHistory();
-            mask.invert = !mask.invert;
-            renderPanel();
-            requestDraw();
-            showToast(mask.invert ? "Invert açık: ayarlar seçimin dışına uygulanır." : "Invert kapalı: ayarlar seçime uygulanır.");
-          },
-        },
-        mask.invert ? "Invert açık — seçimin dışı düzenleniyor" : "Invert (tersine çevir)",
-      ),
-      el("p", { class: "hint" }, "Örn. dişleri seçip Invert açınca ışık ayarı dişlerin dışına (diş eti vb.) gider."),
+      el("p", { class: "hint" }, mask.invert ? "Invert açık — aşağıdaki ayarlar seçimin dışına uygulanır." : "Aşağıdaki ayarlar seçili maske alanına uygulanır."),
     );
     if (mask.type === MASK_RADIAL) {
       children.push(
@@ -1376,39 +1476,8 @@ function maskSection(photo) {
       });
       children.push(s.node);
     }
-    children.push(
-      el(
-        "label",
-        { class: "check" },
-        el("input", {
-          type: "checkbox",
-          checked: photo.showMask,
-          onchange: (e) => {
-            photo.showMask = e.target.checked;
-            requestDraw();
-          },
-        }),
-        "Kırmızı maske önizlemesi (kapalıyken düzenlemeyi daha net görürsünüz)",
-      ),
-      el(
-        "button",
-        {
-          type: "button",
-          class: "button ghost wide",
-          onclick: () => {
-            pushHistory();
-            photo.masks.splice(photo.selectedMask, 1);
-            photo.selectedMask = photo.masks.length - 1;
-            syncMaskTextures(photo);
-            renderPanel();
-            requestDraw();
-          },
-        },
-        "Maskeyi sil",
-      ),
-    );
   }
-  return section("Maskeler", ...children);
+  return section("Maske ayarları", ...children);
 }
 
 function sharePanel() {
