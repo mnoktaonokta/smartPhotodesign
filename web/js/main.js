@@ -466,25 +466,40 @@ function hitSlot(sx, sy) {
 
 function draw() {
   if (!renderer) return;
-  const { width, height, dpr } = renderer.resize();
-  overlay.width = width;
-  overlay.height = height;
-  overlayCtx.clearRect(0, 0, width, height);
-  renderer.clear([0.075, 0.078, 0.086]);
 
   const showCanvas = state.tab !== "share";
-  glCanvas.hidden = !showCanvas;
-  overlay.hidden = !showCanvas;
+  // Do not use [hidden] on GL/overlay — display:none makes client size 0×0 and
+  // used to collapse the buffer to 1×1 (extreme zoom after Share → Edit).
+  // Visibility is handled by CSS via #stage[data-tab="share"].
+  glCanvas.hidden = false;
+  overlay.hidden = false;
   sharePreview.hidden = showCanvas || !state.share.previewUrl;
   editActions.hidden = state.tab !== "edit";
   stage.dataset.tab = state.tab;
   stage.dataset.tool = state.tool;
+  if (stageToolbar) stageToolbar.hidden = state.tab !== "edit";
+
   if (!showCanvas) {
     clearBefore.hidden = true;
     clearAfter.hidden = true;
     slotLabels.hidden = true;
     return;
   }
+
+  // Force layout after toolbar visibility changes (Share → Edit).
+  void stage.offsetWidth;
+  const sized = renderer.resize();
+  const { width, height, dpr } = sized;
+  if (sized.invalid || width <= 2 || height <= 2) {
+    // Flex/toolbar layout may not be ready yet this frame.
+    requestAnimationFrame(() => requestDraw());
+    return;
+  }
+
+  overlay.width = width;
+  overlay.height = height;
+  overlayCtx.clearRect(0, 0, width, height);
+  renderer.clear([0.075, 0.078, 0.086]);
 
   const hasAny = !!(state.photos.before || state.photos.after);
   stage.classList.toggle("is-empty", !hasAny);
@@ -946,10 +961,11 @@ overlay.addEventListener(
     if (state.tab !== "edit") return;
     const photo = activePhoto();
     if (!photo) return;
+    const L = layouts[state.activeSlot];
+    // Ignore zoom while the stage has an invalid size (e.g. mid tab switch).
+    if (!L || L.rw < 8 || L.rh < 8 || overlay.width <= 2 || overlay.height <= 2) return;
     event.preventDefault();
     const [sx, sy] = pointerPos(event);
-    const L = layouts[state.activeSlot];
-    if (!L) return;
     const factor = Math.exp(-event.deltaY * 0.0015);
     photo.geometry = zoomAt(photo.geometry, photo.meta.width, photo.meta.height, currentAspect(), factor, (sx - L.cx) / L.rw, (sy - L.cy) / L.rh);
     syncControls();
@@ -989,6 +1005,13 @@ function setTab(tab) {
   drag = null;
   renderPanel();
   requestDraw();
+  // Second pass after flex/toolbar layout settles (Share → Edit).
+  if (tab === "edit") {
+    requestAnimationFrame(() => {
+      requestDraw();
+      requestAnimationFrame(() => requestDraw());
+    });
+  }
   if (tab === "share") scheduleSharePreview(0);
 }
 

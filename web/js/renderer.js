@@ -112,8 +112,15 @@ export class Renderer {
 
   resize() {
     const dpr = window.devicePixelRatio || 1;
-    const w = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
-    const h = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
+    // Prefer wrap size if the canvas reports 0 (e.g. mid tab switch / flex settle).
+    const parent = this.canvas.parentElement;
+    const cssW = this.canvas.clientWidth || parent?.clientWidth || 0;
+    const cssH = this.canvas.clientHeight || parent?.clientHeight || 0;
+    if (cssW < 2 || cssH < 2) {
+      return { width: this.canvas.width || 1, height: this.canvas.height || 1, dpr, invalid: true };
+    }
+    const w = Math.max(1, Math.round(cssW * dpr));
+    const h = Math.max(1, Math.round(cssH * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w;
       this.canvas.height = h;

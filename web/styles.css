@@ -248,6 +248,14 @@ body {
   height: 100%;
 }
 
+/* Keep canvas layout size on Share — [hidden]/display:none collapses to 0×0
+   and the next Edit draw used to resize the GL buffer to 1×1 (fake zoom). */
+.stage[data-tab="share"] #gl,
+.stage[data-tab="share"] #overlay {
+  visibility: hidden;
+  pointer-events: none;
+}
+
 #overlay {
   cursor: grab;
   touch-action: none;
@@ -344,6 +352,7 @@ body {
 #share-preview {
   position: absolute;
   inset: 24px;
+  z-index: 2;
   width: calc(100% - 48px);
   height: calc(100% - 48px);
   object-fit: contain;
