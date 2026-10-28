@@ -14,7 +14,7 @@ import {
   pan,
   zoomAt,
 } from "./geometry.js";
-import { History } from "./history.js";
+import { SlotHistory } from "./history.js";
 import { blendMatch, measure, solveMatch } from "./match.js";
 import { MAX_MASKS } from "./shaders.js";
 import { Renderer } from "./renderer.js";
@@ -94,7 +94,7 @@ const state = {
   presets: loadPresets(),
 };
 
-const history = new History();
+const history = new SlotHistory();
 const stage = document.getElementById("stage");
 const glCanvas = document.getElementById("gl");
 const overlay = document.getElementById("overlay");
@@ -263,9 +263,10 @@ function applyPixels(photo) {
 
 let historyCooldown = false;
 function pushHistory({ includePixels = false } = {}) {
-  const photo = activePhoto();
+  const slot = state.activeSlot;
+  const photo = state.photos[slot];
   if (!photo || committing || historyCooldown) return;
-  history.push(state.activeSlot, photo, { includePixels });
+  history.push(slot, photo, { includePixels });
   updateHistoryButtons();
   // Collapse rapid slider/brush events into one undo step.
   historyCooldown = true;
@@ -275,25 +276,26 @@ function pushHistory({ includePixels = false } = {}) {
 }
 
 function updateHistoryButtons() {
-  btnUndo.disabled = !history.canUndo;
-  btnRedo.disabled = !history.canRedo;
+  const slot = state.activeSlot;
+  btnUndo.disabled = !history.canUndo(slot);
+  btnRedo.disabled = !history.canRedo(slot);
 }
 
 function undo() {
-  const slot = history.undo(state.photos, applyPixels);
-  if (slot == null) return;
-  state.activeSlot = slot;
-  syncMaskTextures(state.photos[slot]);
+  const slot = state.activeSlot;
+  const photo = state.photos[slot];
+  if (!history.undo(slot, photo, applyPixels)) return;
+  syncMaskTextures(photo);
   updateHistoryButtons();
   renderPanel();
   requestDraw();
 }
 
 function redo() {
-  const slot = history.redo(state.photos, applyPixels);
-  if (slot == null) return;
-  state.activeSlot = slot;
-  syncMaskTextures(state.photos[slot]);
+  const slot = state.activeSlot;
+  const photo = state.photos[slot];
+  if (!history.redo(slot, photo, applyPixels)) return;
+  syncMaskTextures(photo);
   updateHistoryButtons();
   renderPanel();
   requestDraw();
@@ -330,7 +332,8 @@ async function openPhoto(slot, file) {
     state.photos[slot] = photo;
     state.activeSlot = slot;
     state.tool = "pan";
-    history.clear();
+    state.cloneSource = null;
+    history.clear(slot);
     updateHistoryButtons();
     if (slot === "after" && state.photos.before) {
       copyFromBefore(photo, { geometry: true });
@@ -347,7 +350,8 @@ function clearPhoto(slot) {
   renderer.deleteTexture(photo.texture);
   renderer.deleteMaskArray(photo.maskArray);
   state.photos[slot] = null;
-  if (!state.photos.before && !state.photos.after) history.clear();
+  history.clear(slot);
+  state.cloneSource = null;
   state.activeSlot = state.photos.before ? "before" : state.photos.after ? "after" : "before";
   state.tool = "pan";
   updateHistoryButtons();
@@ -490,6 +494,28 @@ function draw() {
 
   positionClearButtons(dpr);
   updateSlotLabels(dpr);
+  drawCloneSource(dpr);
+}
+
+function drawCloneSource(dpr) {
+  if (state.tool !== "clone" || !state.cloneSource) return;
+  const photo = activePhoto();
+  const L = layouts[state.activeSlot];
+  if (!photo || !L) return;
+  const [sx, sy] = imageToScreen(photo, L, ...state.cloneSource);
+  const ctx = overlayCtx;
+  const r = 8 * dpr;
+  ctx.strokeStyle = "rgba(43,179,163,0.95)";
+  ctx.lineWidth = 1.5 * dpr;
+  ctx.beginPath();
+  ctx.moveTo(sx - r, sy);
+  ctx.lineTo(sx + r, sy);
+  ctx.moveTo(sx, sy - r);
+  ctx.lineTo(sx, sy + r);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(sx, sy, 4 * dpr, 0, Math.PI * 2);
+  ctx.stroke();
 }
 
 function drawEmptyFrame(L, dpr, slot, active) {
@@ -665,9 +691,11 @@ overlay.addEventListener("pointerdown", (event) => {
   const [sx, sy] = pointerPos(event);
   const dpr = window.devicePixelRatio || 1;
   const hit = hitSlot(sx, sy);
+  // Switch active photo without resetting the current tool.
   if (hit && hit !== state.activeSlot) {
     state.activeSlot = hit;
-    state.tool = "pan";
+    state.cloneSource = null;
+    updateHistoryButtons();
     renderPanel();
     requestDraw();
   }
@@ -692,6 +720,7 @@ overlay.addEventListener("pointerdown", (event) => {
     photo.selectedMask = photo.masks.length - 1;
     photo.showMask = true;
     drag = { kind: "maskB", creating: true };
+    renderPanel();
     return;
   }
 
@@ -718,12 +747,12 @@ overlay.addEventListener("pointerdown", (event) => {
     mask.bitmap = selectSubjectAt(photo.pixels, photo.meta.width, photo.meta.height, photo.maskMap.width, photo.maskMap.height, u, v);
     photo.masks.push(mask);
     photo.selectedMask = photo.masks.length - 1;
-    photo.showMask = true;
+    // Hide red overlay so light/color edits are visible; Invert is in Maskeler.
+    photo.showMask = false;
     syncMaskTextures(photo);
-    state.tool = "pan";
     renderPanel();
     requestDraw();
-    showToast("Nesne seçildi. Invert ile diş dışı alanlara ayar uygulayabilirsiniz.");
+    showToast("Nesne seçildi. Maskeler → Invert ile dışını düzenleyin.");
     return;
   }
 
@@ -736,6 +765,7 @@ overlay.addEventListener("pointerdown", (event) => {
       ensureBitmap(mask, photo.maskMap.width, photo.maskMap.height);
       photo.masks.push(mask);
       photo.selectedMask = photo.masks.length - 1;
+      renderPanel();
     } else {
       pushHistory();
       ensureBitmap(mask, photo.maskMap.width, photo.maskMap.height);
@@ -750,13 +780,11 @@ overlay.addEventListener("pointerdown", (event) => {
   }
 
   if (state.tool === "heal" || state.tool === "clone") {
-    if (state.tool === "clone" && event.altKey) {
+    // Clone: first click picks source; Alt+click re-picks. Later clicks paint.
+    if (state.tool === "clone" && (event.altKey || !state.cloneSource)) {
       state.cloneSource = screenToImage(photo, L, sx, sy);
-      showToast("Klon kaynağı seçildi.");
-      return;
-    }
-    if (state.tool === "clone" && !state.cloneSource) {
-      showToast("Önce Alt+tık ile kaynak seçin.", true);
+      showToast(event.altKey ? "Yeni kaynak seçildi — şimdi boyayın." : "Kaynak seçildi — şimdi boyayın.");
+      requestDraw();
       return;
     }
     pushHistory({ includePixels: true });
@@ -863,7 +891,7 @@ function endDrag() {
         mask.b = screenToImage(photo, L, A[0], A[1] + L.rh * 0.3);
       }
     }
-    state.tool = "pan";
+    // Keep the active tool so another mask can be drawn without re-selecting.
     renderPanel();
   }
   drag = null;
@@ -915,8 +943,10 @@ stage.addEventListener("drop", (event) => {
 // ---------- panel ----------
 
 function setTab(tab) {
+  if (state.tab === tab) return;
   state.tab = tab;
   state.tool = "pan";
+  state.cloneSource = null;
   drag = null;
   renderPanel();
   requestDraw();
@@ -926,7 +956,8 @@ function setTab(tab) {
 function setActiveSlot(slot) {
   if (state.activeSlot === slot) return;
   state.activeSlot = slot;
-  state.tool = "pan";
+  state.cloneSource = null;
+  updateHistoryButtons();
   renderPanel();
   requestDraw();
 }
@@ -1004,9 +1035,11 @@ function toolsSection(photo) {
             class: `chip${state.tool === id ? " is-active" : ""}`,
             onclick: () => {
               state.tool = id;
+              if (id === "clone") state.cloneSource = null;
               if (id === "subject") showToast("Diş veya nesneye tıklayın.");
-              if (id === "clone") showToast("Alt+tık kaynak, sürükleyerek boyayın.");
+              if (id === "clone") showToast("İlk tık kaynak seçer, sonraki tıklar boyar.");
               if (id === "heal") showToast("Diş eti çizgisi vb. üzerinde sürükleyin.");
+              if (id === "linear" || id === "radial" || id === "brush") showToast("Araç seçili kalır; bitince Kaydır’a dönün.");
               renderPanel();
               requestDraw();
             },
@@ -1037,16 +1070,16 @@ function toolsSection(photo) {
           mask.bitmap = selectTeethMask(photo.pixels, photo.meta.width, photo.meta.height, photo.maskMap.width, photo.maskMap.height);
           photo.masks.push(mask);
           photo.selectedMask = photo.masks.length - 1;
-          photo.showMask = true;
+          photo.showMask = false;
           syncMaskTextures(photo);
           renderPanel();
           requestDraw();
-          showToast("Parlak diş bölgesi seçildi. Invert ile dışı düzenleyebilirsiniz.");
+          showToast("Dişler seçildi. Aşağıdaki Invert ile dışını düzenleyin.");
         },
       },
       "Dişleri otomatik seç",
     ),
-    el("p", { class: "hint" }, "İyileştir: çevredeki dokuya göre yumuşatır. Klon: Alt+tık kaynak, sonra boyayın. Nesne seç / diş seç maske üretir; Invert ile tersine çevirin."),
+    el("p", { class: "hint" }, "Klon: ilk tık kaynak, sonraki tıklar boyar (Alt+tık yeni kaynak). İyileştir: çevredeki dokuya yumuşatır. Maske seçiliyken Invert ve ışık ayarları Maskeler bölümündedir."),
   );
 }
 
@@ -1295,19 +1328,21 @@ function maskSection(photo) {
   if (mask) {
     children.push(
       el(
-        "label",
-        { class: "check" },
-        el("input", {
-          type: "checkbox",
-          checked: mask.invert,
-          onchange: (e) => {
+        "button",
+        {
+          type: "button",
+          class: `button wide${mask.invert ? " is-armed" : ""}`,
+          onclick: () => {
             pushHistory();
-            mask.invert = e.target.checked;
+            mask.invert = !mask.invert;
+            renderPanel();
             requestDraw();
+            showToast(mask.invert ? "Invert açık: ayarlar seçimin dışına uygulanır." : "Invert kapalı: ayarlar seçime uygulanır.");
           },
-        }),
-        "Invert (tersine çevir)",
+        },
+        mask.invert ? "Invert açık — seçimin dışı düzenleniyor" : "Invert (tersine çevir)",
       ),
+      el("p", { class: "hint" }, "Örn. dişleri seçip Invert açınca ışık ayarı dişlerin dışına (diş eti vb.) gider."),
     );
     if (mask.type === MASK_RADIAL) {
       children.push(
@@ -1353,7 +1388,7 @@ function maskSection(photo) {
             requestDraw();
           },
         }),
-        "Maske alanını göster",
+        "Kırmızı maske önizlemesi (kapalıyken düzenlemeyi daha net görürsünüz)",
       ),
       el(
         "button",
@@ -1749,7 +1784,8 @@ async function loadClinicLogos() {
   }
 }
 
-document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.tab)));
+// Only nav step buttons — #stage also has data-tab for CSS and must not catch clicks.
+document.querySelectorAll(".steps [data-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.tab)));
 window.addEventListener("resize", requestDraw);
 window.addEventListener("keydown", (event) => {
   const mod = event.ctrlKey || event.metaKey;

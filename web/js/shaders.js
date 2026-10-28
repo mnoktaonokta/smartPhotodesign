@@ -171,7 +171,8 @@ void main() {
   c = rolloff(c);
   vec3 srgb = encodeSrgb(c);
 
-  if (overlay > 0.0) srgb = mix(srgb, vec3(1.0, 0.18, 0.22), overlay * 0.5);
+  // Light red veil so tone edits remain readable under the mask preview.
+  if (overlay > 0.0) srgb = mix(srgb, vec3(1.0, 0.25, 0.28), overlay * 0.22);
   bool outside = abs(vFrame.x) > 0.5 || abs(vFrame.y) > 0.5;
   if (outside && uDimOutside) srgb *= 0.32;
   outColor = vec4(srgb, 1.0);

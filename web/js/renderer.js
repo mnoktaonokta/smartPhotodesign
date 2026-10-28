@@ -71,6 +71,8 @@ export class Renderer {
 
   updateMaskLayer(maskArray, layer, bytes) {
     if (!maskArray) return;
+    const need = maskArray.width * maskArray.height;
+    const data = bytes && bytes.length >= need ? bytes : new Uint8Array(need);
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D_ARRAY, maskArray.texture);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
@@ -85,13 +87,13 @@ export class Renderer {
       1,
       gl.RED,
       gl.UNSIGNED_BYTE,
-      bytes,
+      data,
     );
   }
 
   clearMaskLayer(maskArray, layer) {
     if (!maskArray) return;
-    this.updateMaskLayer(maskArray, layer, new Uint8Array(maskArray.width * maskArray.height));
+    this.updateMaskLayer(maskArray, layer, null);
   }
 
   deleteMaskArray(maskArray) {

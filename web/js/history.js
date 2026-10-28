@@ -1,54 +1,64 @@
-// Undo / redo snapshots for photo edits. Pixel buffers are cloned only when needed.
+// Per-slot undo / redo. Before and After keep independent stacks.
 
 const MAX_STEPS = 40;
 
-export class History {
+export class SlotHistory {
   constructor() {
-    this.undoStack = [];
-    this.redoStack = [];
+    this.stacks = {
+      before: { undo: [], redo: [] },
+      after: { undo: [], redo: [] },
+    };
   }
 
-  get canUndo() {
-    return this.undoStack.length > 0;
+  canUndo(slot) {
+    return (this.stacks[slot]?.undo.length || 0) > 0;
   }
 
-  get canRedo() {
-    return this.redoStack.length > 0;
+  canRedo(slot) {
+    return (this.stacks[slot]?.redo.length || 0) > 0;
   }
 
-  clear() {
-    this.undoStack = [];
-    this.redoStack = [];
+  clear(slot) {
+    if (slot) {
+      this.stacks[slot] = { undo: [], redo: [] };
+      return;
+    }
+    this.stacks.before = { undo: [], redo: [] };
+    this.stacks.after = { undo: [], redo: [] };
   }
 
   /** Capture a reversible snapshot for ``slot``. ``pixels`` optional Uint16Array clone. */
   push(slot, photo, { includePixels = false } = {}) {
-    if (!photo) return;
-    this.undoStack.push(snapshot(slot, photo, includePixels));
-    if (this.undoStack.length > MAX_STEPS) this.undoStack.shift();
-    this.redoStack = [];
+    if (!photo || !this.stacks[slot]) return;
+    const stack = this.stacks[slot];
+    stack.undo.push(snapshot(photo, includePixels));
+    if (stack.undo.length > MAX_STEPS) stack.undo.shift();
+    stack.redo = [];
   }
 
-  undo(photos, applyPixels) {
-    const entry = this.undoStack.pop();
-    if (!entry) return null;
-    const current = photos[entry.slot];
-    if (current) this.redoStack.push(snapshot(entry.slot, current, !!entry.pixels));
-    return restore(entry, photos, applyPixels);
+  undo(slot, photo, applyPixels) {
+    const stack = this.stacks[slot];
+    if (!stack || !photo) return false;
+    const entry = stack.undo.pop();
+    if (!entry) return false;
+    stack.redo.push(snapshot(photo, !!entry.pixels));
+    restore(entry, photo, applyPixels);
+    return true;
   }
 
-  redo(photos, applyPixels) {
-    const entry = this.redoStack.pop();
-    if (!entry) return null;
-    const current = photos[entry.slot];
-    if (current) this.undoStack.push(snapshot(entry.slot, current, !!entry.pixels));
-    return restore(entry, photos, applyPixels);
+  redo(slot, photo, applyPixels) {
+    const stack = this.stacks[slot];
+    if (!stack || !photo) return false;
+    const entry = stack.redo.pop();
+    if (!entry) return false;
+    stack.undo.push(snapshot(photo, !!entry.pixels));
+    restore(entry, photo, applyPixels);
+    return true;
   }
 }
 
-function snapshot(slot, photo, includePixels) {
+function snapshot(photo, includePixels) {
   return {
-    slot,
     params: { ...photo.params },
     geometry: { ...photo.geometry },
     masks: photo.masks.map(cloneMask),
@@ -75,9 +85,7 @@ function cloneMask(mask) {
   };
 }
 
-function restore(entry, photos, applyPixels) {
-  const photo = photos[entry.slot];
-  if (!photo) return entry.slot;
+function restore(entry, photo, applyPixels) {
   photo.params = { ...entry.params };
   photo.geometry = { ...entry.geometry };
   photo.masks = entry.masks.map(cloneMask);
@@ -94,5 +102,4 @@ function restore(entry, photos, applyPixels) {
     photo.pixels.set(entry.pixels);
     applyPixels?.(photo);
   }
-  return entry.slot;
 }
