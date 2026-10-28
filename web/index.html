@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="tr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Smart Photo Design</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">Smart Photo Design</div>
+      <nav class="steps" aria-label="Görünüm">
+        <button type="button" data-tab="edit" class="is-active"><span>1</span>Düzenle</button>
+        <button type="button" data-tab="share"><span>2</span>Paylaş</button>
+      </nav>
+      <div class="toolbar-actions" id="edit-actions">
+        <button type="button" class="button ghost" id="btn-undo" title="Geri al (Ctrl+Z)" disabled>Geri</button>
+        <button type="button" class="button ghost" id="btn-redo" title="İleri al (Ctrl+Shift+Z)" disabled>İleri</button>
+      </div>
+      <div class="privacy">Fotoğraflar yalnız bu bilgisayarda işlenir</div>
+    </header>
+    <main class="workspace">
+      <div id="stage" class="stage is-empty" data-tab="edit">
+        <div id="stage-toolbar" class="stage-toolbar" hidden></div>
+        <div class="stage-canvas-wrap">
+          <canvas id="gl"></canvas>
+          <canvas id="overlay"></canvas>
+          <button type="button" class="frame-clear" id="clear-before" hidden title="Before fotoğrafını kaldır" aria-label="Before kaldır">×</button>
+          <button type="button" class="frame-clear" id="clear-after" hidden title="After fotoğrafını kaldır" aria-label="After kaldır">×</button>
+          <div id="slot-labels" class="slot-labels" hidden>
+            <span data-slot="before"><em>BEFORE</em></span>
+            <span data-slot="after"><em>AFTER</em></span>
+          </div>
+          <img id="share-preview" alt="Paylaşım görseli önizlemesi" hidden />
+          <p id="empty-message" class="empty-message">Sola Before, sağa After fotoğrafını sürükleyin veya tıklayın.</p>
+        </div>
+      </div>
+      <aside id="panel" class="panel" aria-label="Ayarlar"></aside>
+    </main>
+    <div id="busy" class="busy" hidden><div class="spinner"></div><span></span></div>
+    <div id="toast" class="toast" role="status" hidden></div>
+    <input id="file-input" type="file" accept=".cr2,.cr3,.nef,.arw,.dng,.orf,.rw2,.raf,.jpg,.jpeg,.png" hidden />
+    <input id="logo-input" type="file" accept=".png,image/png" hidden />
+    <script type="module" src="js/main.js"></script>
+  </body>
+</html>
