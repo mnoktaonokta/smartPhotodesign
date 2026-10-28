@@ -10,21 +10,28 @@
   <body>
     <header class="topbar">
       <div class="brand">Smart Photo Design</div>
-      <nav class="steps" aria-label="Adımlar">
-        <button type="button" data-tab="before"><span>1</span>Before</button>
-        <button type="button" data-tab="after"><span>2</span>After</button>
-        <button type="button" data-tab="compare"><span>3</span>Karşılaştır</button>
-        <button type="button" data-tab="share"><span>4</span>Paylaş</button>
+      <nav class="steps" aria-label="Görünüm">
+        <button type="button" data-tab="edit" class="is-active"><span>1</span>Düzenle</button>
+        <button type="button" data-tab="share"><span>2</span>Paylaş</button>
       </nav>
+      <div class="toolbar-actions" id="edit-actions">
+        <button type="button" class="button ghost" id="btn-undo" title="Geri al (Ctrl+Z)" disabled>Geri</button>
+        <button type="button" class="button ghost" id="btn-redo" title="İleri al (Ctrl+Shift+Z)" disabled>İleri</button>
+      </div>
       <div class="privacy">Fotoğraflar yalnız bu bilgisayarda işlenir</div>
     </header>
     <main class="workspace">
-      <div id="stage" class="stage is-empty">
+      <div id="stage" class="stage is-empty" data-tab="edit">
         <canvas id="gl"></canvas>
         <canvas id="overlay"></canvas>
-        <div id="view-toggle" class="view-toggle" hidden></div>
+        <button type="button" class="frame-clear" id="clear-before" hidden title="Before fotoğrafını kaldır" aria-label="Before kaldır">×</button>
+        <button type="button" class="frame-clear" id="clear-after" hidden title="After fotoğrafını kaldır" aria-label="After kaldır">×</button>
+        <div id="slot-labels" class="slot-labels" hidden>
+          <span data-slot="before">BEFORE</span>
+          <span data-slot="after">AFTER</span>
+        </div>
         <img id="share-preview" alt="Paylaşım görseli önizlemesi" hidden />
-        <p id="empty-message" class="empty-message"></p>
+        <p id="empty-message" class="empty-message">Sola Before, sağa After fotoğrafını sürükleyin veya tıklayın.</p>
       </div>
       <aside id="panel" class="panel" aria-label="Ayarlar"></aside>
     </main>

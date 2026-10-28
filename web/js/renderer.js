@@ -28,6 +28,7 @@ export class Renderer {
     gl.enableVertexAttribArray(loc);
     gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
     this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE);
+    this._emptyMaskArray = this._createEmptyMaskArray();
   }
 
   /** Upload linear half-float RGB pixels. */
@@ -44,8 +45,67 @@ export class Renderer {
     return texture;
   }
 
+  updateTexture(texture, width, height, halfFloats) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, height, gl.RGB, gl.HALF_FLOAT, halfFloats);
+  }
+
   deleteTexture(texture) {
     if (texture) this.gl.deleteTexture(texture);
+  }
+
+  /** R8 texture array with MAX_MASKS layers for brush/subject masks. */
+  createMaskArray(width, height) {
+    const gl = this.gl;
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, width, height, MAX_MASKS, 0, gl.RED, gl.UNSIGNED_BYTE, null);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return { texture, width, height };
+  }
+
+  updateMaskLayer(maskArray, layer, bytes) {
+    if (!maskArray) return;
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, maskArray.texture);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texSubImage3D(
+      gl.TEXTURE_2D_ARRAY,
+      0,
+      0,
+      0,
+      layer,
+      maskArray.width,
+      maskArray.height,
+      1,
+      gl.RED,
+      gl.UNSIGNED_BYTE,
+      bytes,
+    );
+  }
+
+  clearMaskLayer(maskArray, layer) {
+    if (!maskArray) return;
+    this.updateMaskLayer(maskArray, layer, new Uint8Array(maskArray.width * maskArray.height));
+  }
+
+  deleteMaskArray(maskArray) {
+    if (maskArray?.texture) this.gl.deleteTexture(maskArray.texture);
+  }
+
+  _createEmptyMaskArray() {
+    const gl = this.gl;
+    const texture = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, texture);
+    gl.texImage3D(gl.TEXTURE_2D_ARRAY, 0, gl.R8, 1, 1, MAX_MASKS, 0, gl.RED, gl.UNSIGNED_BYTE, new Uint8Array(MAX_MASKS));
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D_ARRAY, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    return texture;
   }
 
   resize() {
@@ -103,7 +163,6 @@ export class Renderer {
     for (let y0 = 0; y0 < height; y0 += stripH) {
       const h = Math.min(stripH, height - y0);
       gl.viewport(0, 0, width, h);
-      // Rows of this strip span frame y in [top, top + h/height); FBO row 0 is the strip's top.
       const top = -0.5 + y0 / height;
       const view = { scale: [1, h / height], offset: [0, top + h / height / 2] };
       this._draw(job, view, true);
@@ -124,6 +183,11 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, job.texture);
     gl.uniform1i(u.uImage, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    const maskTex = job.maskArray?.texture || this._emptyMaskArray;
+    gl.bindTexture(gl.TEXTURE_2D_ARRAY, maskTex);
+    gl.uniform1i(u.uMaskMaps, 1);
+    gl.uniform1i(u.uHasMaskMaps, job.maskArray ? 1 : 0);
     gl.uniform2f(u.uViewScale, view.scale[0], view.scale[1]);
     gl.uniform2f(u.uViewOffset, view.offset[0], view.offset[1]);
     gl.uniform1i(u.uFlipY, flipY ? 1 : 0);
@@ -145,11 +209,23 @@ export class Renderer {
     gl.uniform1f(u.uSaturation, job.saturation);
     const masks = job.masks.slice(0, MAX_MASKS);
     gl.uniform1i(u.uMaskCount, masks.length);
-    if (masks.length) {
-      gl.uniform4fv(u.uMaskLine, masks.flatMap((m) => m.line));
-      gl.uniform4fv(u.uMaskTone, masks.flatMap((m) => m.tone));
-      gl.uniform4fv(u.uMaskColor, masks.flatMap((m) => m.color));
-    }
+    const types = new Int32Array(MAX_MASKS);
+    const inverts = new Int32Array(MAX_MASKS);
+    const lines = new Float32Array(MAX_MASKS * 4);
+    const tones = new Float32Array(MAX_MASKS * 4);
+    const colors = new Float32Array(MAX_MASKS * 4);
+    masks.forEach((m, i) => {
+      types[i] = m.type || 0;
+      inverts[i] = m.invert ? 1 : 0;
+      lines.set(m.line, i * 4);
+      tones.set(m.tone, i * 4);
+      colors.set(m.color, i * 4);
+    });
+    gl.uniform1iv(u.uMaskType, types);
+    gl.uniform1iv(u.uMaskInvert, inverts);
+    gl.uniform4fv(u.uMaskLine, lines);
+    gl.uniform4fv(u.uMaskTone, tones);
+    gl.uniform4fv(u.uMaskColor, colors);
     gl.uniform1i(u.uOverlayMask, job.overlayMask ?? -1);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }

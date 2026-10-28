@@ -8,11 +8,15 @@ from core.image_composer import (
     CompositionSettings,
     LabelStyle,
     LogoStyle,
+    VignetteStyle,
+    apply_vignette,
     canvas_size,
     compose,
+    compose_single,
     divider_width,
     fit_to_panel,
     resolve_layout,
+    single_canvas_size,
     slider_frames,
     to_jpeg_bytes,
     to_png_bytes,
@@ -32,6 +36,7 @@ def _solid(h: int, w: int, rgb: tuple[int, int, int]) -> np.ndarray:
     [
         ("side_by_side", "4:5", 4 / 5),
         ("side_by_side", "1:1", 1.0),
+        ("side_by_side", "16:9", 16 / 9),
         ("stacked", "9:16", 9 / 16),
         ("stacked", "4:5", 4 / 5),
     ],
@@ -201,3 +206,58 @@ def test_exports_round_trip():
         with Image.open(io.BytesIO(encoded)) as decoded:
             assert decoded.format == fmt
             assert decoded.size == (96, 64)
+
+
+def test_divider_can_be_hidden():
+    before = _solid(400, 400, (255, 0, 0))
+    after = _solid(400, 400, (0, 0, 255))
+    settings = CompositionSettings(aspect="original", fit="crop", labels=LabelStyle(enabled=False), divider_percent=0)
+    assert divider_width(800, 400, settings) == 0
+    image = np.asarray(compose(before, after, settings))
+    assert tuple(image[200, 399]) == (255, 0, 0)
+    assert tuple(image[200, 400]) == (0, 0, 255)
+
+
+def test_compose_single_photo():
+    photo = _solid(300, 400, (10, 20, 30))
+    settings = CompositionSettings(aspect="1:1", fit="pad", labels=LabelStyle(enabled=False))
+    image = compose_single(photo, settings)
+    assert image.size[0] == image.size[1]
+    via_compose = compose(photo, None, settings)
+    assert via_compose.size == image.size
+
+
+def test_single_canvas_16x9():
+    photo = _solid(400, 400, (0, 0, 0))
+    w, h = single_canvas_size(photo, CompositionSettings(aspect="16:9", fit="crop"))
+    assert w / h == pytest.approx(16 / 9, abs=0.01)
+
+
+def test_vignette_darkens_corners():
+    photo = _solid(200, 200, (200, 200, 200))
+    out = apply_vignette(photo, 0.8, 0.4)
+    assert out[100, 100].mean() > out[5, 5].mean()
+    both = compose(
+        photo,
+        photo,
+        CompositionSettings(
+            aspect="1:1",
+            fit="crop",
+            labels=LabelStyle(enabled=False),
+            divider_percent=0,
+            vignette=VignetteStyle(mode="both", amount=0.7),
+        ),
+    )
+    arr = np.asarray(both)
+    assert arr[10, 10].mean() < 180
+
+
+def test_label_font_variants_render():
+    photo = _solid(400, 400, (0, 0, 0))
+    for font in ("sans_bold", "sans", "serif_bold", "mono_bold", "source_sans"):
+        image = compose(
+            photo,
+            photo,
+            CompositionSettings(aspect="1:1", fit="crop", labels=LabelStyle(font=font, text_color=(255, 0, 0), background_opacity=0)),
+        )
+        assert np.asarray(image).sum() > 0

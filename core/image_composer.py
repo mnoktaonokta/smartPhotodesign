@@ -12,20 +12,30 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-Layout = Literal["side_by_side", "stacked"]
-AspectRatio = Literal["original", "1:1", "4:5", "9:16"]
+Layout = Literal["side_by_side", "stacked", "single"]
+AspectRatio = Literal["original", "1:1", "4:5", "9:16", "16:9"]
 FitMode = Literal["pad", "crop"]
 LogoPosition = Literal["divider", "bottom_right", "top_right"]
+FontKey = Literal["sans_bold", "sans", "serif_bold", "mono_bold", "source_sans"]
+VignetteMode = Literal["off", "before", "after", "both", "canvas"]
 RGB = tuple[int, int, int]
 Align = tuple[float, float]
 CENTER: Align = (0.5, 0.5)
 
-ASPECT_VALUES: dict[str, float] = {"1:1": 1.0, "4:5": 4 / 5, "9:16": 9 / 16}
+ASPECT_VALUES: dict[str, float] = {"1:1": 1.0, "4:5": 4 / 5, "9:16": 9 / 16, "16:9": 16 / 9}
 MAX_CANVAS_SIDE = 6000
 MAX_LOGO_HEIGHT_FRACTION = 0.5
 VIDEO_WIDTH = 1080
 VIDEO_MAX_HEIGHT = 1920
-FONT_PATH = Path(__file__).resolve().parent.parent / "assets" / "fonts" / "DejaVuSans-Bold.ttf"
+FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+FONT_FILES: dict[str, Path] = {
+    "sans_bold": FONTS_DIR / "DejaVuSans-Bold.ttf",
+    "sans": FONTS_DIR / "DejaVuSans.ttf",
+    "serif_bold": FONTS_DIR / "DejaVuSerif-Bold.ttf",
+    "mono_bold": FONTS_DIR / "DejaVuSansMono-Bold.ttf",
+    "source_sans": FONTS_DIR / "SourceSans3-Regular.ttf",
+}
+FONT_PATH = FONT_FILES["sans_bold"]
 
 
 @dataclass(frozen=True)
@@ -36,6 +46,7 @@ class LabelStyle:
     size_percent: float = 4.0
     text_color: RGB = (255, 255, 255)
     background_opacity: float = 0.45
+    font: FontKey = "sans_bold"
 
 
 @dataclass(frozen=True)
@@ -43,6 +54,13 @@ class LogoStyle:
     position: LogoPosition = "bottom_right"
     width_percent: float = 18.0
     opacity: float = 0.9
+
+
+@dataclass(frozen=True)
+class VignetteStyle:
+    mode: VignetteMode = "off"
+    amount: float = 0.45
+    midpoint: float = 0.55
 
 
 @dataclass(frozen=True)
@@ -54,20 +72,25 @@ class CompositionSettings:
     divider_percent: float = 0.4
     labels: LabelStyle = field(default_factory=LabelStyle)
     logo: LogoStyle = field(default_factory=LogoStyle)
+    vignette: VignetteStyle = field(default_factory=VignetteStyle)
 
 
 def compose(
-    before: np.ndarray,
-    after: np.ndarray,
+    before: np.ndarray | None,
+    after: np.ndarray | None,
     settings: CompositionSettings,
     logo: Image.Image | None = None,
     *,
     max_side: int = MAX_CANVAS_SIDE,
 ) -> Image.Image:
-    """Build the before/after canvas as an RGB image."""
+    """Build the before/after canvas as an RGB image. Either photo may be omitted for a single frame."""
+    if before is None and after is None:
+        raise ValueError("En az bir fotoğraf gerekli.")
+    if before is None or after is None:
+        return compose_single(before if before is not None else after, settings, logo, max_side=max_side)
+
     width, height = canvas_size(before, after, settings, max_side=max_side)
     gap = divider_width(width, height, settings)
-    # Padded photos hug the divider so the pair reads as one block.
     if settings.layout == "side_by_side":
         panel_w, panel_h = (width - gap) // 2, height
         origins = [(0, 0), (width - panel_w, 0)]
@@ -77,9 +100,15 @@ def compose(
         origins = [(0, 0), (0, height - panel_h)]
         aligns = [(0.5, 1.0), (0.5, 0.0)]
 
-    canvas = Image.new("RGB", (width, height), settings.background)
-    for image, origin, align in zip((before, after), origins, aligns):
+    panels = []
+    for image, align, which in ((before, aligns[0], "before"), (after, aligns[1], "after")):
         panel = fit_to_panel(image, panel_w, panel_h, settings.fit, settings.background, align)
+        if settings.vignette.mode in (which, "both"):
+            panel = apply_vignette(panel, settings.vignette.amount, settings.vignette.midpoint)
+        panels.append(panel)
+
+    canvas = Image.new("RGB", (width, height), settings.background)
+    for panel, origin in zip(panels, origins):
         canvas.paste(Image.fromarray(panel), origin)
 
     canvas = canvas.convert("RGBA")
@@ -91,7 +120,50 @@ def compose(
             _draw_label(canvas, text, box, settings.labels)
     if logo is not None:
         _paste_logo(canvas, logo, settings.logo.position, settings.logo)
+    if settings.vignette.mode == "canvas":
+        rgb = apply_vignette(np.asarray(canvas.convert("RGB")), settings.vignette.amount, settings.vignette.midpoint)
+        return Image.fromarray(rgb)
     return canvas.convert("RGB")
+
+
+def compose_single(
+    image: np.ndarray,
+    settings: CompositionSettings,
+    logo: Image.Image | None = None,
+    *,
+    max_side: int = MAX_CANVAS_SIDE,
+) -> Image.Image:
+    """Single-photo share canvas."""
+    width, height = single_canvas_size(image, settings, max_side=max_side)
+    panel = fit_to_panel(image, width, height, settings.fit, settings.background)
+    if settings.vignette.mode in ("before", "after", "both", "canvas"):
+        panel = apply_vignette(panel, settings.vignette.amount, settings.vignette.midpoint)
+    canvas = Image.fromarray(panel).convert("RGBA")
+    if settings.labels.enabled:
+        text = settings.labels.after_text or settings.labels.before_text
+        if text.strip():
+            _draw_label(canvas, text, content_box(image, width, height, settings.fit), settings.labels)
+    if logo is not None:
+        position = "bottom_right" if settings.logo.position == "divider" else settings.logo.position
+        _paste_logo(canvas, logo, position, settings.logo)
+    return canvas.convert("RGB")
+
+
+def apply_vignette(image: np.ndarray, amount: float, midpoint: float = 0.55) -> np.ndarray:
+    """Darken edges of an RGB uint8 image. ``amount`` 0..1, ``midpoint`` where falloff begins."""
+    amount = float(np.clip(amount, 0.0, 1.0))
+    if amount <= 1e-6:
+        return image
+    h, w = image.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    rx, ry = max(cx, 1.0), max(cy, 1.0)
+    r = np.sqrt(((xx - cx) / rx) ** 2 + ((yy - cy) / ry) ** 2)
+    mid = float(np.clip(midpoint, 0.05, 0.95))
+    falloff = np.clip((r - mid) / max(1e-6, 1.0 - mid), 0.0, 1.0)
+    falloff = falloff * falloff * (3 - 2 * falloff)
+    factor = (1.0 - amount * falloff).astype(np.float32)[..., None]
+    return np.clip(image.astype(np.float32) * factor, 0, 255).astype(np.uint8)
 
 
 def video_size(image: np.ndarray, aspect: AspectRatio) -> tuple[int, int]:
@@ -113,21 +185,17 @@ def slider_frames(
     logo: Image.Image | None = None,
     size: tuple[int, int] | None = None,
 ) -> tuple[Image.Image, Image.Image]:
-    """Full-canvas Before and After frames for a sliding-divider video.
-
-    Both frames share the same photo placement and logo so that revealing one
-    over the other only changes the photo and its label. The Before label sits
-    top-left and the After label top-right, matching the divider sides.
-    """
+    """Full-canvas Before and After frames for a sliding-divider video."""
     width, height = size or video_size(before, settings.aspect)
-    # A logo centred on the canvas would cover the subject once the divider moves.
     logo_position: str = "bottom_center" if settings.logo.position == "divider" else settings.logo.position
     frames = []
-    for image, text, side in (
-        (before, settings.labels.before_text, "left"),
-        (after, settings.labels.after_text, "right"),
+    for image, text, side, which in (
+        (before, settings.labels.before_text, "left", "before"),
+        (after, settings.labels.after_text, "right", "after"),
     ):
         panel = fit_to_panel(image, width, height, settings.fit, settings.background)
+        if settings.vignette.mode in (which, "both", "canvas"):
+            panel = apply_vignette(panel, settings.vignette.amount, settings.vignette.midpoint)
         canvas = Image.fromarray(panel).convert("RGBA")
         if settings.labels.enabled:
             _draw_label(canvas, text, content_box(image, width, height, settings.fit), settings.labels, side)
@@ -173,6 +241,30 @@ def canvas_size(
     return max(2, round(width * scale)), max(2, round(height * scale))
 
 
+def single_canvas_size(
+    image: np.ndarray,
+    settings: CompositionSettings,
+    *,
+    max_side: int = MAX_CANVAS_SIDE,
+) -> tuple[int, int]:
+    h, w = image.shape[:2]
+    if settings.aspect == "original":
+        ratio = w / h
+    else:
+        ratio = ASPECT_VALUES[settings.aspect]
+    if settings.fit == "crop":
+        height = min(h, w / ratio)
+        width = height * ratio
+    else:
+        # Pad: fit whole image inside the ratio box.
+        if w / h >= ratio:
+            width, height = w, w / ratio
+        else:
+            height, width = h, h * ratio
+    scale = min(1.0, max_side / max(width, height))
+    return max(2, round(width * scale)), max(2, round(height * scale))
+
+
 def divider_width(width: int, height: int, settings: CompositionSettings) -> int:
     if settings.divider_percent <= 0:
         return 0
@@ -186,10 +278,7 @@ def content_box(
     fit: FitMode,
     align: Align = CENTER,
 ) -> tuple[int, int, int, int]:
-    """Return the (x0, y0, x1, y1) area the photo occupies inside a panel.
-
-    ``align`` places a padded photo along each axis: 0 start, 0.5 center, 1 end.
-    """
+    """Return the (x0, y0, x1, y1) area the photo occupies inside a panel."""
     if fit == "crop":
         return 0, 0, width, height
     h, w = image.shape[:2]
@@ -247,12 +336,16 @@ def to_tiff_bytes(image: Image.Image) -> bytes:
     return buf.getvalue()
 
 
-@lru_cache(maxsize=16)
-def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+@lru_cache(maxsize=64)
+def _font(size: int, key: str = "sans_bold") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    path = FONT_FILES.get(key, FONT_PATH)
     try:
-        return ImageFont.truetype(str(FONT_PATH), size)
+        return ImageFont.truetype(str(path), size)
     except OSError:
-        return ImageFont.load_default(size)
+        try:
+            return ImageFont.truetype(str(FONT_PATH), size)
+        except OSError:
+            return ImageFont.load_default(size)
 
 
 def _draw_label(
@@ -268,7 +361,7 @@ def _draw_label(
         return
     photo_side = max(box[2] - box[0], box[3] - box[1])
     font_px = max(10, round(photo_side * style.size_percent / 100))
-    font = _font(font_px)
+    font = _font(font_px, getattr(style, "font", "sans_bold") or "sans_bold")
     pad_x, pad_y = round(font_px * 0.6), round(font_px * 0.35)
     margin = round(font_px * 0.6)
 

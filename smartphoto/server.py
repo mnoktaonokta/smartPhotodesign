@@ -24,9 +24,11 @@ from PIL import Image
 
 from core.image_composer import (
     ASPECT_VALUES,
+    FONT_FILES,
     CompositionSettings,
     LabelStyle,
     LogoStyle,
+    VignetteStyle,
     compose,
     content_box,
     resolve_layout,
@@ -166,10 +168,24 @@ def _pixels_response(item: StoredImage, full: bool, max_side: int | None) -> Res
 
 def _compose_response(body: bytes) -> Response:
     header, payload = _unpack(body)
-    before = _rgba_part(header, payload, "before")
-    after = _rgba_part(header, payload, "after")
+    before = _optional_rgba_part(header, payload, "before")
+    after = _optional_rgba_part(header, payload, "after")
+    if before is None and after is None:
+        raise HTTPException(400, "En az bir fotoğraf gerekli.")
     logo = _logo_part(header, payload)
-    settings = composition_from_json(header.get("settings", {}), before)
+    ref = before if before is not None else after
+    settings = composition_from_json(header.get("settings", {}), ref)
+    if before is None or after is None:
+        settings = CompositionSettings(
+            layout="single",
+            aspect=settings.aspect,
+            fit=settings.fit,
+            background=settings.background,
+            divider_percent=0,
+            labels=settings.labels,
+            logo=settings.logo,
+            vignette=settings.vignette,
+        )
     fmt = header.get("format", "preview")
     if fmt == "preview":
         image = compose(before, after, settings, logo, max_side=SHARE_PREVIEW_MAX_SIDE)
@@ -221,21 +237,33 @@ def composition_from_json(data: dict[str, Any], before: np.ndarray) -> Compositi
     layout = data.get("layout", "auto")
     if layout == "auto":
         layout = resolve_layout(before, aspect)
-    if layout not in ("side_by_side", "stacked"):
+    if layout not in ("side_by_side", "stacked", "single"):
         raise HTTPException(400, "Geçersiz düzen.")
     fit = data.get("fit", "pad")
     if fit not in ("pad", "crop"):
         raise HTTPException(400, "Geçersiz sığdırma.")
     labels = data.get("labels", {})
     logo = data.get("logo", {})
+    vignette = data.get("vignette", {})
     position = logo.get("position", "divider")
     if position not in ("divider", "bottom_right", "top_right"):
         raise HTTPException(400, "Geçersiz logo konumu.")
+    font = str(labels.get("font", "sans_bold"))
+    if font not in FONT_FILES:
+        raise HTTPException(400, "Geçersiz yazı tipi.")
+    vignette_mode = str(vignette.get("mode", "off"))
+    if vignette_mode not in ("off", "before", "after", "both", "canvas"):
+        raise HTTPException(400, "Geçersiz vinyet modu.")
+    show_divider = bool(data.get("showDivider", True))
+    divider_percent = float(data.get("dividerPercent", 0.4 if show_divider else 0.0))
+    if not show_divider:
+        divider_percent = 0.0
     return CompositionSettings(
         layout=layout,
         aspect=aspect,
         fit=fit,
         background=_hex(data.get("background", "#FFFFFF")),
+        divider_percent=float(np.clip(divider_percent, 0.0, 5.0)),
         labels=LabelStyle(
             enabled=bool(labels.get("enabled", True)),
             before_text=str(labels.get("beforeText", "BEFORE"))[:40],
@@ -243,11 +271,17 @@ def composition_from_json(data: dict[str, Any], before: np.ndarray) -> Compositi
             size_percent=float(np.clip(labels.get("sizePercent", 4.0), 1.0, 12.0)),
             text_color=_hex(labels.get("textColor", "#FFFFFF")),
             background_opacity=float(np.clip(labels.get("backgroundOpacity", 0.45), 0.0, 1.0)),
+            font=font,  # type: ignore[arg-type]
         ),
         logo=LogoStyle(
             position=position,
             width_percent=float(np.clip(logo.get("widthPercent", 18.0), MIN_LOGO_PERCENT, MAX_LOGO_PERCENT)),
             opacity=float(np.clip(logo.get("opacity", 0.9), 0.0, 1.0)),
+        ),
+        vignette=VignetteStyle(
+            mode=vignette_mode,  # type: ignore[arg-type]
+            amount=float(np.clip(vignette.get("amount", 0.45), 0.0, 1.0)),
+            midpoint=float(np.clip(vignette.get("midpoint", 0.55), 0.05, 0.95)),
         ),
     )
 
@@ -274,9 +308,16 @@ def _slice(payload: memoryview, part: dict[str, Any]) -> bytes:
 
 
 def _rgba_part(header: dict[str, Any], payload: memoryview, key: str) -> np.ndarray:
+    image = _optional_rgba_part(header, payload, key)
+    if image is None:
+        raise HTTPException(400, f"Eksik görüntü: {key}")
+    return image
+
+
+def _optional_rgba_part(header: dict[str, Any], payload: memoryview, key: str) -> np.ndarray | None:
     part = header.get(key)
     if not part:
-        raise HTTPException(400, f"Eksik görüntü: {key}")
+        return None
     width, height = int(part["width"]), int(part["height"])
     raw = _slice(payload, part)
     if width <= 0 or height <= 0 or len(raw) != width * height * 4:

@@ -88,6 +88,27 @@ def test_compose_rejects_size_mismatch(client):
     assert client.post("/api/compose", content=body).status_code == 400
 
 
+def test_compose_single_image_and_16x9(client):
+    body = _pack(
+        {
+            "format": "png",
+            "settings": {
+                "aspect": "16:9",
+                "fit": "crop",
+                "showDivider": False,
+                "labels": {"enabled": False, "font": "sans_bold"},
+                "vignette": {"mode": "canvas", "amount": 0.3},
+            },
+        },
+        {"before": (_rgba(320, 180, (255, 0, 0)), {"width": 320, "height": 180})},
+    )
+    response = client.post("/api/compose", content=body)
+    assert response.status_code == 200
+    assert response.headers["X-Layout"] == "single"
+    with Image.open(io.BytesIO(response.content)) as img:
+        assert img.width / img.height == pytest.approx(16 / 9, abs=0.02)
+
+
 def test_slider_frames_stack_before_over_after(client):
     body = _pack(
         {"settings": {"aspect": "9:16", "fit": "crop", "labels": {"enabled": False}}},

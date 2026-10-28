@@ -3,6 +3,9 @@
 // photographic stops, and colors keep their ratios when brightness changes.
 
 export const MAX_MASKS = 8;
+export const MASK_LINEAR = 0;
+export const MASK_RADIAL = 1;
+export const MASK_BRUSH = 2;
 
 export const VERTEX_SHADER = `#version 300 es
 in vec2 aPos;
@@ -19,16 +22,19 @@ void main() {
 
 export const FRAGMENT_SHADER = `#version 300 es
 precision highp float;
+precision highp sampler2DArray;
 #define MAX_MASKS ${MAX_MASKS}
 
 in vec2 vFrame;
 out vec4 outColor;
 
 uniform sampler2D uImage;
+uniform sampler2DArray uMaskMaps;
 uniform vec2 uImageSize;
 uniform mat3 uFrameToUv;
 uniform bool uDimOutside;
 uniform vec3 uBackground;
+uniform bool uHasMaskMaps;
 
 uniform bool uCameraSpace;
 uniform vec3 uGains;
@@ -45,6 +51,8 @@ uniform float uVibrance;
 uniform float uSaturation;
 
 uniform int uMaskCount;
+uniform int uMaskType[MAX_MASKS];
+uniform int uMaskInvert[MAX_MASKS];
 uniform vec4 uMaskLine[MAX_MASKS];
 uniform vec4 uMaskTone[MAX_MASKS];
 uniform vec4 uMaskColor[MAX_MASKS];
@@ -58,12 +66,22 @@ float bump(float x, float center, float width) {
   return exp(-d * d);
 }
 
-float maskWeight(int i, vec2 p) {
-  vec2 a = uMaskLine[i].xy;
-  vec2 d = uMaskLine[i].zw - a;
-  float len2 = max(dot(d, d), 1e-6);
-  float t = dot(p - a, d) / len2;
-  return 1.0 - smoothstep(0.0, 1.0, t);
+float maskWeight(int i, vec2 p, vec2 uv) {
+  float w = 0.0;
+  if (uMaskType[i] == 0) {
+    vec2 a = uMaskLine[i].xy;
+    vec2 d = uMaskLine[i].zw - a;
+    float len2 = max(dot(d, d), 1e-6);
+    float t = dot(p - a, d) / len2;
+    w = 1.0 - smoothstep(0.0, 1.0, t);
+  } else if (uMaskType[i] == 1) {
+    float d = distance(p, uMaskLine[i].xy);
+    w = 1.0 - smoothstep(uMaskLine[i].z, max(uMaskLine[i].w, uMaskLine[i].z + 1e-3), d);
+  } else if (uHasMaskMaps) {
+    w = texture(uMaskMaps, vec3(uv, float(i))).r;
+  }
+  if (uMaskInvert[i] == 1) w = 1.0 - w;
+  return w;
 }
 
 vec3 tone(vec3 c, float contrast, float highlights, float shadows) {
@@ -136,7 +154,7 @@ void main() {
   float overlay = 0.0;
   for (int i = 0; i < MAX_MASKS; i++) {
     if (i >= uMaskCount) break;
-    float w = maskWeight(i, p);
+    float w = maskWeight(i, p, uv);
     exposure += w * uMaskTone[i].x;
     contrast += w * uMaskTone[i].y;
     highlights += w * uMaskTone[i].z;

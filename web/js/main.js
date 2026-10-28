@@ -14,17 +14,31 @@ import {
   pan,
   zoomAt,
 } from "./geometry.js";
+import { History } from "./history.js";
 import { blendMatch, measure, solveMatch } from "./match.js";
 import { MAX_MASKS } from "./shaders.js";
 import { Renderer } from "./renderer.js";
 import { VIDEO_DURATIONS, encodeSliderVideo } from "./slider-video.js";
+import {
+  MASK_BRUSH,
+  MASK_LINEAR,
+  MASK_RADIAL,
+  brushStamp,
+  clonePixels,
+  cloneStamp,
+  ensureBitmap,
+  healStamp,
+  maskDefaults,
+  maskMapSize,
+  selectSubjectAt,
+  selectTeethMask,
+} from "./tools.js";
 
 const MAX_EXPORT_SIDE = 6000;
-// Enough source pixels for a 1080 x 1920 frame even when the photo is cropped to fill it.
 const VIDEO_SOURCE_SIDE = 2400;
 const SHARE_PREVIEW_SIDE = 1400;
 const MEASURE_SIDE = 160;
-const FRAME_PADDING = 0.86;
+const FRAME_PADDING = 0.9;
 const DEFAULT_MATCH_STRENGTH = 0.8;
 const PRESET_STORAGE_KEY = "spd.presets.v1";
 const BUILTIN_PRESETS = [
@@ -32,31 +46,55 @@ const BUILTIN_PRESETS = [
 ];
 const GLOBAL_KEYS = ["exposure", "contrast", "highlights", "shadows", "whites", "blacks", "temperature", "tint", "vibrance", "saturation"];
 const SLOTS = { before: "Before", after: "After" };
+const FONT_OPTIONS = [
+  ["sans_bold", "Sans Bold"],
+  ["sans", "Sans"],
+  ["serif_bold", "Serif Bold"],
+  ["mono_bold", "Mono Bold"],
+  ["source_sans", "Source Sans"],
+];
+const MASK_TYPE_LABELS = {
+  [MASK_LINEAR]: "Doğrusal",
+  [MASK_RADIAL]: "Radyal",
+  [MASK_BRUSH]: "Fırça",
+};
 
 const state = {
-  tab: "before",
+  tab: "edit",
+  activeSlot: "before",
   aspect: "original",
   photos: { before: null, after: null },
-  compare: { mode: "split", split: 0.5 },
-  afterView: "side",
-  lastAfterCompare: "side",
+  tool: "pan", // pan | linear | radial | brush | erase | subject | heal | clone
+  brushSize: 0.04,
+  cloneSource: null,
   share: {
     layout: "auto",
     aspect: "4:5",
     fit: "pad",
     background: "#FFFFFF",
-    labels: { enabled: true, beforeText: "BEFORE", afterText: "AFTER", sizePercent: 4, textColor: "#FFFFFF", backgroundOpacity: 0.45 },
-    logo: { position: "divider", widthPercent: 18, opacity: 0.9 },
+    showDivider: true,
+    labels: {
+      enabled: true,
+      beforeText: "BEFORE",
+      afterText: "AFTER",
+      sizePercent: 4,
+      textColor: "#FFFFFF",
+      backgroundOpacity: 0.45,
+      font: "sans_bold",
+    },
+    logo: { position: "divider", widthPercent: 18, opacity: 0.9, variant: "beyaz" },
+    vignette: { mode: "off", amount: 0.45, midpoint: 0.55 },
     videoDuration: "normal",
     logoBytes: null,
     logoName: null,
+    clinicLogos: { beyaz: null, siyah: null },
     previewUrl: null,
     previewInfo: "",
   },
-  maskDraw: false,
   presets: loadPresets(),
 };
 
+const history = new History();
 const stage = document.getElementById("stage");
 const glCanvas = document.getElementById("gl");
 const overlay = document.getElementById("overlay");
@@ -67,12 +105,20 @@ const busy = document.getElementById("busy");
 const toast = document.getElementById("toast");
 const fileInput = document.getElementById("file-input");
 const logoInput = document.getElementById("logo-input");
+const btnUndo = document.getElementById("btn-undo");
+const btnRedo = document.getElementById("btn-redo");
+const clearBefore = document.getElementById("clear-before");
+const clearAfter = document.getElementById("clear-after");
+const slotLabels = document.getElementById("slot-labels");
+const editActions = document.getElementById("edit-actions");
 
 let renderer;
 let controls = {};
 let drawQueued = false;
 let drag = null;
 let sharePreviewTimer = null;
+let layouts = { before: null, after: null };
+let committing = false;
 
 // ---------- photo state ----------
 
@@ -84,10 +130,6 @@ function defaultParams(meta) {
     params.tint = Math.round(asShot.tint);
   }
   return params;
-}
-
-function defaultMask(a, b) {
-  return { a, b, exposure: 0, contrast: 0, highlights: 0, shadows: 0, temperature: 0, tint: 0, saturation: 0 };
 }
 
 function isKelvin(photo) {
@@ -117,10 +159,10 @@ function photoRect(photo) {
   return rect;
 }
 
-/**
- * Uniforms for the renderer. Coordinates are in preview pixels even when
- * ``texture`` is the full-resolution upload, since sampling uses normalized uv.
- */
+function activePhoto() {
+  return state.photos[state.activeSlot];
+}
+
 function buildJob(photo, { texture = photo.texture, overlayMask = -1, params = photo.params } = {}) {
   const { meta } = photo;
   const rect = photoRect(photo);
@@ -137,6 +179,7 @@ function buildJob(photo, { texture = photo.texture, overlayMask = -1, params = p
   const m = meta.rgbCam;
   return {
     texture,
+    maskArray: photo.maskArray,
     imageSize: [W, H],
     frameToUv: frameToUvMatrix(rect, W, H),
     cameraSpace: isKelvin(photo),
@@ -151,12 +194,28 @@ function buildJob(photo, { texture = photo.texture, overlayMask = -1, params = p
     blacks: params.blacks / 100,
     vibrance: params.vibrance / 100,
     saturation: params.saturation / 100,
-    masks: photo.masks.map((mask) => ({
-      line: [mask.a[0] * W, mask.a[1] * H, mask.b[0] * W, mask.b[1] * H],
-      tone: [mask.exposure, mask.contrast / 100, mask.highlights / 100, mask.shadows / 100],
-      color: [...relativeGains(mask.temperature, mask.tint), mask.saturation / 100],
-    })),
+    masks: photo.masks.map((mask) => maskUniforms(mask, W, H)),
     overlayMask,
+  };
+}
+
+function maskUniforms(mask, W, H) {
+  let line;
+  if (mask.type === MASK_RADIAL) {
+    const [cx, cy] = mask.center;
+    const scale = Math.min(W, H);
+    line = [cx * W, cy * H, mask.inner * scale, mask.outer * scale];
+  } else if (mask.type === MASK_LINEAR) {
+    line = [mask.a[0] * W, mask.a[1] * H, mask.b[0] * W, mask.b[1] * H];
+  } else {
+    line = [0, 0, 0, 0];
+  }
+  return {
+    type: mask.type ?? MASK_LINEAR,
+    invert: !!mask.invert,
+    line,
+    tone: [mask.exposure, mask.contrast / 100, mask.highlights / 100, mask.shadows / 100],
+    color: [...relativeGains(mask.temperature, mask.tint), mask.saturation / 100],
   };
 }
 
@@ -179,10 +238,65 @@ async function renderFull(photo, maxSide = MAX_EXPORT_SIDE) {
     let longSide = Math.round(Math.max(rect.fw, rect.fh) * scale);
     longSide = Math.min(longSide, maxSide);
     const [w, h] = frameSize(longSide);
+    // Export uses parametric masks; brush masks are at preview resolution so scale via UV sampling.
     return { rgba: renderer.renderPixels(buildJob(photo, { texture }), w, h), width: w, height: h };
   } finally {
     renderer.deleteTexture(texture);
   }
+}
+
+function syncMaskTextures(photo) {
+  if (!photo?.maskArray) return;
+  photo.masks.forEach((mask, i) => {
+    if (mask.type === MASK_BRUSH && mask.bitmap) {
+      renderer.updateMaskLayer(photo.maskArray, i, mask.bitmap);
+    } else {
+      renderer.clearMaskLayer(photo.maskArray, i);
+    }
+  });
+  for (let i = photo.masks.length; i < MAX_MASKS; i++) renderer.clearMaskLayer(photo.maskArray, i);
+}
+
+function applyPixels(photo) {
+  renderer.updateTexture(photo.texture, photo.meta.width, photo.meta.height, photo.pixels);
+}
+
+let historyCooldown = false;
+function pushHistory({ includePixels = false } = {}) {
+  const photo = activePhoto();
+  if (!photo || committing || historyCooldown) return;
+  history.push(state.activeSlot, photo, { includePixels });
+  updateHistoryButtons();
+  // Collapse rapid slider/brush events into one undo step.
+  historyCooldown = true;
+  setTimeout(() => {
+    historyCooldown = false;
+  }, 450);
+}
+
+function updateHistoryButtons() {
+  btnUndo.disabled = !history.canUndo;
+  btnRedo.disabled = !history.canRedo;
+}
+
+function undo() {
+  const slot = history.undo(state.photos, applyPixels);
+  if (slot == null) return;
+  state.activeSlot = slot;
+  syncMaskTextures(state.photos[slot]);
+  updateHistoryButtons();
+  renderPanel();
+  requestDraw();
+}
+
+function redo() {
+  const slot = history.redo(state.photos, applyPixels);
+  if (slot == null) return;
+  state.activeSlot = slot;
+  syncMaskTextures(state.photos[slot]);
+  updateHistoryButtons();
+  renderPanel();
+  requestDraw();
 }
 
 // ---------- loading ----------
@@ -192,11 +306,20 @@ async function openPhoto(slot, file) {
     const meta = await uploadPhoto(file);
     const pixels = await fetchPixels(meta.id);
     const texture = renderer.createTexture(pixels.width, pixels.height, pixels.data);
+    const map = maskMapSize(pixels.width, pixels.height);
+    const maskArray = renderer.createMaskArray(map.width, map.height);
     const previous = state.photos[slot];
-    if (previous) renderer.deleteTexture(previous.texture);
+    if (previous) {
+      renderer.deleteTexture(previous.texture);
+      renderer.deleteMaskArray(previous.maskArray);
+    }
     const photo = {
       meta: { ...meta, width: pixels.width, height: pixels.height },
       texture,
+      pixels: pixels.data,
+      originalPixels: clonePixels(pixels.data),
+      maskArray,
+      maskMap: map,
       geometry: defaultGeometry(),
       params: defaultParams(meta),
       masks: [],
@@ -205,8 +328,10 @@ async function openPhoto(slot, file) {
       match: null,
     };
     state.photos[slot] = photo;
-    state.tab = slot;
-    state.maskDraw = false;
+    state.activeSlot = slot;
+    state.tool = "pan";
+    history.clear();
+    updateHistoryButtons();
     if (slot === "after" && state.photos.before) {
       copyFromBefore(photo, { geometry: true });
       runMatch(photo);
@@ -214,6 +339,22 @@ async function openPhoto(slot, file) {
   });
   renderPanel();
   requestDraw();
+}
+
+function clearPhoto(slot) {
+  const photo = state.photos[slot];
+  if (!photo) return;
+  renderer.deleteTexture(photo.texture);
+  renderer.deleteMaskArray(photo.maskArray);
+  state.photos[slot] = null;
+  if (!state.photos.before && !state.photos.after) history.clear();
+  state.activeSlot = state.photos.before ? "before" : state.photos.after ? "after" : "before";
+  state.tool = "pan";
+  updateHistoryButtons();
+  if (state.tab === "share" && !(state.photos.before || state.photos.after)) setTab("edit");
+  renderPanel();
+  requestDraw();
+  if (state.tab === "share") scheduleSharePreview(0);
 }
 
 function copyFromBefore(after, { geometry = false } = {}) {
@@ -243,7 +384,7 @@ function runMatch(after) {
   after.params = blendMatch(base, solution, DEFAULT_MATCH_STRENGTH);
 }
 
-// ---------- drawing ----------
+// ---------- layout / drawing ----------
 
 function requestDraw() {
   if (drawQueued) return;
@@ -254,22 +395,29 @@ function requestDraw() {
   });
 }
 
-/** How the After tab shows Before next to the photo being edited. */
-function afterViewMode() {
-  return state.tab === "after" && state.photos.before && state.photos.after ? state.afterView : "single";
+/** Side-by-side Before/After frames. Missing slot keeps an empty dashed frame. */
+function dualLayout(canvasW, canvasH) {
+  const a = currentAspect();
+  const gap = Math.round(canvasW * 0.02);
+  const available = canvasW * 0.94 - gap;
+  let rw = Math.min(available / 2, canvasH * FRAME_PADDING * a);
+  let rh = rw / a;
+  if (rh > canvasH * FRAME_PADDING) {
+    rh = canvasH * FRAME_PADDING;
+    rw = rh * a;
+  }
+  const total = rw * 2 + gap;
+  const left = (canvasW - total) / 2;
+  const cy = canvasH / 2;
+  return {
+    before: { rw, rh, cx: left + rw / 2, cy },
+    after: { rw, rh, cx: left + rw + gap + rw / 2, cy },
+    gap,
+  };
 }
 
-/**
- * Screen placement of the edited photo's frame. In side-by-side mode the
- * edited (After) frame is on the right and ``beforeCx`` places Before on the left.
- */
-function editLayout(canvasW, canvasH) {
+function singleLayout(canvasW, canvasH) {
   const a = currentAspect();
-  if (afterViewMode() === "side") {
-    const gap = Math.round(canvasW * 0.012);
-    const rw = Math.min((canvasW * 0.94 - gap) / 2, canvasH * FRAME_PADDING * a);
-    return { rw, rh: rw / a, cx: (canvasW + gap + rw) / 2, cy: canvasH / 2, beforeCx: (canvasW - gap - rw) / 2 };
-  }
   const rw = Math.min(canvasW * FRAME_PADDING, canvasH * FRAME_PADDING * a);
   const rh = rw / a;
   return { rw, rh, cx: canvasW / 2, cy: canvasH / 2 };
@@ -287,8 +435,14 @@ function frameBox(L) {
   return { x: Math.round(L.cx - L.rw / 2), y: Math.round(L.cy - L.rh / 2), w: Math.round(L.rw), h: Math.round(L.rh) };
 }
 
-function splitX(L) {
-  return Math.round(L.cx - L.rw / 2 + L.rw * state.compare.split);
+function hitSlot(sx, sy) {
+  for (const slot of ["before", "after"]) {
+    const L = layouts[slot];
+    if (!L) continue;
+    const box = frameBox(L);
+    if (sx >= box.x && sx <= box.x + box.w && sy >= box.y && sy <= box.y + box.h) return slot;
+  }
+  return null;
 }
 
 function draw() {
@@ -303,66 +457,68 @@ function draw() {
   glCanvas.hidden = !showCanvas;
   overlay.hidden = !showCanvas;
   sharePreview.hidden = showCanvas || !state.share.previewUrl;
-  if (!showCanvas) return;
+  editActions.hidden = state.tab !== "edit";
+  stage.dataset.tab = state.tab;
+  stage.dataset.tool = state.tool;
+  if (!showCanvas) {
+    clearBefore.hidden = true;
+    clearAfter.hidden = true;
+    slotLabels.hidden = true;
+    return;
+  }
 
-  if (state.tab === "compare") return drawCompare(width, height, dpr);
+  const hasAny = !!(state.photos.before || state.photos.after);
+  stage.classList.toggle("is-empty", !hasAny);
+  const dual = dualLayout(width, height);
+  layouts = { before: dual.before, after: dual.after };
 
-  const photo = state.photos[state.tab];
-  stage.classList.toggle("is-empty", !photo);
-  if (!photo) return;
-  const L = editLayout(width, height);
-  const overlayMask = photo.showMask ? photo.selectedMask : -1;
   const full = { x: 0, y: 0, w: width, h: height };
-  const mode = afterViewMode();
-  const before = state.photos.before;
-  if (mode === "side") {
-    const B = { ...L, cx: L.beforeCx };
-    renderer.drawToCanvas(buildJob(before), full, frameView(B, width, height, false), frameBox(B));
-    renderer.drawToCanvas(buildJob(photo, { overlayMask }), full, frameView(L, width, height, false), frameBox(L));
-    drawFrameOverlay(B, dpr, false);
-  } else {
-    renderer.drawToCanvas(buildJob(photo, { overlayMask }), full, frameView(L, width, height, true));
-    if (mode === "split") {
-      const box = frameBox(L);
-      const x = splitX(L);
-      renderer.drawToCanvas(buildJob(before), full, frameView(L, width, height, false), { ...box, w: Math.max(0, x - box.x) });
+  for (const slot of ["before", "after"]) {
+    const photo = state.photos[slot];
+    const L = layouts[slot];
+    const box = frameBox(L);
+    const active = state.activeSlot === slot;
+    if (photo) {
+      const overlayMask = active && photo.showMask ? photo.selectedMask : -1;
+      renderer.drawToCanvas(buildJob(photo, { overlayMask }), full, frameView(L, width, height, false), box);
+      drawFrameOverlay(L, dpr, active && drag?.kind === "pan", active);
+      if (active) drawMaskOverlay(photo, L, dpr);
+    } else {
+      drawEmptyFrame(L, dpr, slot, active);
     }
   }
-  drawFrameOverlay(L, dpr, drag?.kind === "pan");
-  drawMaskOverlay(photo, L, dpr, mode !== "single");
-  if (mode === "split") drawSplitHandle(L, dpr);
-  if (mode !== "single") {
-    const left = mode === "side" ? L.beforeCx - L.rw / 2 : L.cx - L.rw / 2;
-    const top = L.cy - L.rh / 2;
-    tag(overlayCtx, "BEFORE", left + 10 * dpr, top + 10 * dpr, dpr, "left");
-    tag(overlayCtx, "AFTER", L.cx + L.rw / 2 - 10 * dpr, top + 10 * dpr, dpr, "right");
-  }
+
+  positionClearButtons(dpr);
+  updateSlotLabels(dpr);
 }
 
-function drawSplitHandle(L, dpr) {
+function drawEmptyFrame(L, dpr, slot, active) {
   const ctx = overlayCtx;
-  const x = splitX(L);
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(x - dpr, L.cy - L.rh / 2, 2 * dpr, L.rh);
-  ctx.beginPath();
-  ctx.arc(x, L.cy, 14 * dpr, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = "#222";
-  ctx.font = `${13 * dpr}px system-ui, sans-serif`;
+  const box = frameBox(L);
+  ctx.save();
+  ctx.strokeStyle = active ? "rgba(43,179,163,0.9)" : "rgba(255,255,255,0.35)";
+  ctx.setLineDash([8 * dpr, 6 * dpr]);
+  ctx.lineWidth = (active ? 2 : 1) * dpr;
+  ctx.strokeRect(box.x, box.y, box.w, box.h);
+  ctx.setLineDash([]);
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.font = `500 ${13 * dpr}px system-ui, sans-serif`;
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
-  ctx.fillText("↔", x, L.cy);
+  ctx.fillText(`${SLOTS[slot]} yükle`, L.cx, L.cy);
+  ctx.restore();
 }
 
-function drawFrameOverlay(L, dpr, thirds) {
+function drawFrameOverlay(L, dpr, thirds, active) {
   const ctx = overlayCtx;
   const x = L.cx - L.rw / 2;
   const y = L.cy - L.rh / 2;
-  ctx.strokeStyle = "rgba(255,255,255,0.85)";
-  ctx.lineWidth = 1 * dpr;
+  ctx.strokeStyle = active ? "rgba(43,179,163,0.95)" : "rgba(255,255,255,0.7)";
+  ctx.lineWidth = (active ? 2 : 1) * dpr;
   ctx.strokeRect(x, y, L.rw, L.rh);
   if (!thirds) return;
   ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 1 * dpr;
   ctx.beginPath();
   for (let i = 1; i < 3; i++) {
     ctx.moveTo(x + (L.rw * i) / 3, y);
@@ -371,6 +527,41 @@ function drawFrameOverlay(L, dpr, thirds) {
     ctx.lineTo(x + L.rw, y + (L.rh * i) / 3);
   }
   ctx.stroke();
+}
+
+function positionClearButtons() {
+  const place = (btn, slot) => {
+    const photo = state.photos[slot];
+    const L = layouts[slot];
+    if (!photo || !L) {
+      btn.hidden = true;
+      return;
+    }
+    const box = frameBox(L);
+    const rect = stage.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    btn.hidden = false;
+    btn.style.left = `${box.x / dpr + 8}px`;
+    btn.style.top = `${box.y / dpr + 8}px`;
+    void rect;
+  };
+  place(clearBefore, "before");
+  place(clearAfter, "after");
+}
+
+function updateSlotLabels(dpr) {
+  slotLabels.hidden = false;
+  for (const span of slotLabels.querySelectorAll("[data-slot]")) {
+    const slot = span.dataset.slot;
+    const L = layouts[slot];
+    if (!L) continue;
+    const box = frameBox(L);
+    span.classList.toggle("is-active", state.activeSlot === slot && !!state.photos[slot]);
+    span.style.left = `${box.x / dpr + 10}px`;
+    span.style.top = `${box.y / dpr + 10}px`;
+    // Keep clear button from overlapping label when photo exists — label sits under clear on left.
+    if (state.photos[slot]) span.style.left = `${box.x / dpr + 42}px`;
+  }
 }
 
 function imageToScreen(photo, L, u, v) {
@@ -385,116 +576,83 @@ function screenToImage(photo, L, sx, sy) {
   return [px / photo.meta.width, py / photo.meta.height];
 }
 
-function drawMaskOverlay(photo, L, dpr, clipToFrame) {
+function drawMaskOverlay(photo, L, dpr) {
   const mask = photo.masks[photo.selectedMask];
   if (!mask || !photo.showMask) return;
   const ctx = overlayCtx;
   ctx.save();
-  if (clipToFrame) {
-    const box = frameBox(L);
-    ctx.beginPath();
-    ctx.rect(box.x, box.y, box.w, box.h);
-    ctx.clip();
-  }
-  const A = imageToScreen(photo, L, ...mask.a);
-  const B = imageToScreen(photo, L, ...mask.b);
-  const dx = B[0] - A[0];
-  const dy = B[1] - A[1];
-  const len = Math.hypot(dx, dy) || 1;
-  const nx = -dy / len;
-  const ny = dx / len;
-  const reach = Math.hypot(overlay.width, overlay.height);
-  const line = (p, dash) => {
-    ctx.setLineDash(dash);
-    ctx.beginPath();
-    ctx.moveTo(p[0] - nx * reach, p[1] - ny * reach);
-    ctx.lineTo(p[0] + nx * reach, p[1] + ny * reach);
-    ctx.stroke();
-  };
-  ctx.lineWidth = 1.5 * dpr;
-  ctx.strokeStyle = "rgba(255,255,255,0.9)";
-  line(A, []);
-  line(B, [6 * dpr, 6 * dpr]);
-  ctx.setLineDash([]);
-  ctx.strokeStyle = "rgba(255,255,255,0.6)";
+  const box = frameBox(L);
   ctx.beginPath();
-  ctx.moveTo(A[0], A[1]);
-  ctx.lineTo(B[0], B[1]);
-  ctx.stroke();
-  for (const [p, r] of [
-    [A, 7],
-    [B, 7],
-    [[(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], 5],
-  ]) {
+  ctx.rect(box.x, box.y, box.w, box.h);
+  ctx.clip();
+
+  if (mask.type === MASK_LINEAR) {
+    const A = imageToScreen(photo, L, ...mask.a);
+    const B = imageToScreen(photo, L, ...mask.b);
+    const dx = B[0] - A[0];
+    const dy = B[1] - A[1];
+    const len = Math.hypot(dx, dy) || 1;
+    const nx = -dy / len;
+    const ny = dx / len;
+    const reach = Math.hypot(overlay.width, overlay.height);
+    const line = (p, dash) => {
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      ctx.moveTo(p[0] - nx * reach, p[1] - ny * reach);
+      ctx.lineTo(p[0] + nx * reach, p[1] + ny * reach);
+      ctx.stroke();
+    };
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    line(A, []);
+    line(B, [6 * dpr, 6 * dpr]);
+    ctx.setLineDash([]);
+    ctx.strokeStyle = "rgba(255,255,255,0.6)";
     ctx.beginPath();
-    ctx.arc(p[0], p[1], r * dpr, 0, Math.PI * 2);
-    ctx.fillStyle = "#ffffff";
-    ctx.fill();
-    ctx.strokeStyle = "rgba(0,0,0,0.6)";
+    ctx.moveTo(A[0], A[1]);
+    ctx.lineTo(B[0], B[1]);
     ctx.stroke();
+    for (const [p, r] of [
+      [A, 7],
+      [B, 7],
+      [[(A[0] + B[0]) / 2, (A[1] + B[1]) / 2], 5],
+    ]) {
+      ctx.beginPath();
+      ctx.arc(p[0], p[1], r * dpr, 0, Math.PI * 2);
+      ctx.fillStyle = "#ffffff";
+      ctx.fill();
+      ctx.strokeStyle = "rgba(0,0,0,0.6)";
+      ctx.stroke();
+    }
+  } else if (mask.type === MASK_RADIAL) {
+    const C = imageToScreen(photo, L, ...mask.center);
+    const scale = Math.min(L.rw, L.rh);
+    // Approximate radii in screen space using frame aspect.
+    const rect = photoRect(photo);
+    const innerPx = mask.inner * Math.min(photo.meta.width, photo.meta.height);
+    const outerPx = mask.outer * Math.min(photo.meta.width, photo.meta.height);
+    const innerScreen = (innerPx / rect.fw) * L.rw;
+    const outerScreen = (outerPx / rect.fw) * L.rw;
+    void scale;
+    ctx.strokeStyle = "rgba(255,255,255,0.9)";
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.beginPath();
+    ctx.arc(C[0], C[1], Math.max(2, innerScreen), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([6 * dpr, 6 * dpr]);
+    ctx.beginPath();
+    ctx.arc(C[0], C[1], Math.max(4, outerScreen), 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.beginPath();
+    ctx.arc(C[0], C[1], 6 * dpr, 0, Math.PI * 2);
+    ctx.fillStyle = "#fff";
+    ctx.fill();
   }
   ctx.restore();
 }
 
-function drawCompare(width, height, dpr) {
-  const { before, after } = state.photos;
-  stage.classList.toggle("is-empty", !(before && after));
-  if (!before || !after) return;
-  const ctx = overlayCtx;
-  if (state.compare.mode === "split") {
-    const L = editLayout(width, height);
-    const view = { scale: [width / L.rw, height / L.rh], offset: [0, 0], dimOutside: false, background: [0.075, 0.078, 0.086] };
-    const full = { x: 0, y: 0, w: width, h: height };
-    const x0 = Math.round(L.cx - L.rw / 2);
-    const y0 = Math.round(L.cy - L.rh / 2);
-    const splitX = Math.round(x0 + L.rw * state.compare.split);
-    renderer.drawToCanvas(buildJob(before), full, view, { x: x0, y: y0, w: Math.max(0, splitX - x0), h: Math.round(L.rh) });
-    renderer.drawToCanvas(buildJob(after), full, view, { x: splitX, y: y0, w: Math.max(0, x0 + Math.round(L.rw) - splitX), h: Math.round(L.rh) });
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(splitX - dpr, y0, 2 * dpr, L.rh);
-    ctx.beginPath();
-    ctx.arc(splitX, L.cy, 14 * dpr, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = "#222";
-    ctx.font = `${13 * dpr}px system-ui, sans-serif`;
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-    ctx.fillText("↔", splitX, L.cy);
-    tag(ctx, "BEFORE", x0 + 10 * dpr, y0 + 10 * dpr, dpr, "left");
-    tag(ctx, "AFTER", x0 + L.rw - 10 * dpr, y0 + 10 * dpr, dpr, "right");
-    return;
-  }
-  const a = currentAspect();
-  const gap = 12 * dpr;
-  const rw = Math.min((width * 0.94 - gap) / 2, height * 0.86 * a);
-  const rh = rw / a;
-  const top = Math.round((height - rh) / 2);
-  const left = Math.round((width - 2 * rw - gap) / 2);
-  const rects = [
-    { x: left, y: top, w: Math.round(rw), h: Math.round(rh) },
-    { x: Math.round(left + rw + gap), y: top, w: Math.round(rw), h: Math.round(rh) },
-  ];
-  const view = { scale: [1, 1], offset: [0, 0], dimOutside: false };
-  renderer.drawToCanvas(buildJob(before), rects[0], view);
-  renderer.drawToCanvas(buildJob(after), rects[1], view);
-  tag(ctx, "BEFORE", rects[0].x + 10 * dpr, top + 10 * dpr, dpr, "left");
-  tag(ctx, "AFTER", rects[1].x + 10 * dpr, top + 10 * dpr, dpr, "left");
-}
-
-function tag(ctx, text, x, y, dpr, align) {
-  ctx.font = `600 ${12 * dpr}px system-ui, sans-serif`;
-  const w = ctx.measureText(text).width + 14 * dpr;
-  const h = 22 * dpr;
-  const left = align === "right" ? x - w : x;
-  ctx.fillStyle = "rgba(0,0,0,0.55)";
-  ctx.fillRect(left, y, w, h);
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  ctx.fillText(text, left + 7 * dpr, y + h / 2);
-}
-
-// ---------- pointer interaction ----------
+// ---------- pointer ----------
 
 function pointerPos(event) {
   const r = overlay.getBoundingClientRect();
@@ -503,57 +661,159 @@ function pointerPos(event) {
 }
 
 overlay.addEventListener("pointerdown", (event) => {
+  if (state.tab !== "edit") return;
   const [sx, sy] = pointerPos(event);
   const dpr = window.devicePixelRatio || 1;
-  if (state.tab === "compare") {
-    if (state.compare.mode !== "split") return;
-    drag = { kind: "split" };
-    updateSplit(sx);
-    overlay.setPointerCapture(event.pointerId);
+  const hit = hitSlot(sx, sy);
+  if (hit && hit !== state.activeSlot) {
+    state.activeSlot = hit;
+    state.tool = "pan";
+    renderPanel();
+    requestDraw();
+  }
+  const slot = hit || state.activeSlot;
+  const photo = state.photos[slot];
+  if (!photo) {
+    if (hit) pickFile(hit);
     return;
   }
-  const photo = state.photos[state.tab];
-  if (!photo) return;
-  const L = editLayout(overlay.width, overlay.height);
+  state.activeSlot = slot;
+  const L = layouts[slot];
   overlay.setPointerCapture(event.pointerId);
 
-  if (state.maskDraw) {
+  if (state.tool === "linear") {
     if (photo.masks.length >= MAX_MASKS) return;
+    pushHistory();
     const point = screenToImage(photo, L, sx, sy);
-    photo.masks.push(defaultMask(point, point));
+    const mask = maskDefaults(MASK_LINEAR);
+    mask.a = point;
+    mask.b = point;
+    photo.masks.push(mask);
     photo.selectedMask = photo.masks.length - 1;
     photo.showMask = true;
-    drag = { kind: "maskB", start: [sx, sy], creating: true };
+    drag = { kind: "maskB", creating: true };
     return;
   }
 
+  if (state.tool === "radial") {
+    if (photo.masks.length >= MAX_MASKS) return;
+    pushHistory();
+    const point = screenToImage(photo, L, sx, sy);
+    const mask = maskDefaults(MASK_RADIAL);
+    mask.center = point;
+    photo.masks.push(mask);
+    photo.selectedMask = photo.masks.length - 1;
+    photo.showMask = true;
+    drag = { kind: "radialOuter", creating: true };
+    renderPanel();
+    requestDraw();
+    return;
+  }
+
+  if (state.tool === "subject") {
+    if (photo.masks.length >= MAX_MASKS) return;
+    pushHistory();
+    const [u, v] = screenToImage(photo, L, sx, sy);
+    const mask = maskDefaults(MASK_BRUSH);
+    mask.bitmap = selectSubjectAt(photo.pixels, photo.meta.width, photo.meta.height, photo.maskMap.width, photo.maskMap.height, u, v);
+    photo.masks.push(mask);
+    photo.selectedMask = photo.masks.length - 1;
+    photo.showMask = true;
+    syncMaskTextures(photo);
+    state.tool = "pan";
+    renderPanel();
+    requestDraw();
+    showToast("Nesne seçildi. Invert ile diş dışı alanlara ayar uygulayabilirsiniz.");
+    return;
+  }
+
+  if (state.tool === "brush" || state.tool === "erase") {
+    let mask = photo.masks[photo.selectedMask];
+    if (!mask || mask.type !== MASK_BRUSH) {
+      if (photo.masks.length >= MAX_MASKS) return;
+      pushHistory();
+      mask = maskDefaults(MASK_BRUSH);
+      ensureBitmap(mask, photo.maskMap.width, photo.maskMap.height);
+      photo.masks.push(mask);
+      photo.selectedMask = photo.masks.length - 1;
+    } else {
+      pushHistory();
+      ensureBitmap(mask, photo.maskMap.width, photo.maskMap.height);
+    }
+    photo.showMask = true;
+    const [u, v] = screenToImage(photo, L, sx, sy);
+    brushStamp(mask.bitmap, photo.maskMap.width, photo.maskMap.height, u, v, state.brushSize, 1, state.tool === "erase");
+    syncMaskTextures(photo);
+    drag = { kind: "brush" };
+    requestDraw();
+    return;
+  }
+
+  if (state.tool === "heal" || state.tool === "clone") {
+    if (state.tool === "clone" && event.altKey) {
+      state.cloneSource = screenToImage(photo, L, sx, sy);
+      showToast("Klon kaynağı seçildi.");
+      return;
+    }
+    if (state.tool === "clone" && !state.cloneSource) {
+      showToast("Önce Alt+tık ile kaynak seçin.", true);
+      return;
+    }
+    pushHistory({ includePixels: true });
+    const [u, v] = screenToImage(photo, L, sx, sy);
+    if (state.tool === "heal") healStamp(photo.pixels, photo.meta.width, photo.meta.height, u, v, state.brushSize);
+    else cloneStamp(photo.pixels, photo.meta.width, photo.meta.height, u, v, state.cloneSource[0], state.cloneSource[1], state.brushSize);
+    applyPixels(photo);
+    drag = { kind: "retouch" };
+    requestDraw();
+    return;
+  }
+
+  // Pan / mask handle edit
   const mask = photo.masks[photo.selectedMask];
-  if (mask && photo.showMask) {
+  if (mask && photo.showMask && mask.type === MASK_LINEAR) {
     const A = imageToScreen(photo, L, ...mask.a);
     const B = imageToScreen(photo, L, ...mask.b);
     const M = [(A[0] + B[0]) / 2, (A[1] + B[1]) / 2];
     const near = (p) => Math.hypot(p[0] - sx, p[1] - sy) < 14 * dpr;
-    if (near(A)) drag = { kind: "maskA" };
-    else if (near(B)) drag = { kind: "maskB" };
-    else if (near(M)) drag = { kind: "maskMove", last: screenToImage(photo, L, sx, sy) };
-    if (drag) return;
+    if (near(A)) {
+      pushHistory();
+      drag = { kind: "maskA" };
+      return;
+    }
+    if (near(B)) {
+      pushHistory();
+      drag = { kind: "maskB" };
+      return;
+    }
+    if (near(M)) {
+      pushHistory();
+      drag = { kind: "maskMove", last: screenToImage(photo, L, sx, sy) };
+      return;
+    }
   }
-  if (afterViewMode() === "split" && Math.abs(sx - splitX(L)) < 10 * dpr && Math.abs(sy - L.cy) < L.rh / 2) {
-    drag = { kind: "split" };
-    return;
+  if (mask && photo.showMask && mask.type === MASK_RADIAL) {
+    const C = imageToScreen(photo, L, ...mask.center);
+    if (Math.hypot(C[0] - sx, C[1] - sy) < 14 * dpr) {
+      pushHistory();
+      drag = { kind: "radialCenter" };
+      return;
+    }
   }
+  pushHistory();
   drag = { kind: "pan", last: [sx, sy] };
   requestDraw();
 });
 
 overlay.addEventListener("pointermove", (event) => {
-  if (!drag) return;
+  if (!drag || state.tab !== "edit") return;
   const [sx, sy] = pointerPos(event);
-  if (drag.kind === "split") return updateSplit(sx);
-  const photo = state.photos[state.tab];
+  const photo = activePhoto();
   if (!photo) return;
-  const L = editLayout(overlay.width, overlay.height);
+  const L = layouts[state.activeSlot];
+  if (!L) return;
   const mask = photo.masks[photo.selectedMask];
+
   if (drag.kind === "pan") {
     const dx = (sx - drag.last[0]) / L.rw;
     const dy = (sy - drag.last[1]) / L.rh;
@@ -570,22 +830,40 @@ overlay.addEventListener("pointermove", (event) => {
     mask.a = [mask.a[0] + d[0], mask.a[1] + d[1]];
     mask.b = [mask.b[0] + d[0], mask.b[1] + d[1]];
     drag.last = p;
+  } else if (drag.kind === "radialCenter" && mask) {
+    mask.center = screenToImage(photo, L, sx, sy);
+  } else if (drag.kind === "radialOuter" && mask) {
+    const [u, v] = screenToImage(photo, L, sx, sy);
+    const dist = Math.hypot(u - mask.center[0], v - mask.center[1]) * Math.max(photo.meta.width / photo.meta.height, 1);
+    mask.outer = Math.max(0.05, Math.min(0.9, dist));
+    mask.inner = Math.min(mask.inner, mask.outer * 0.6);
+  } else if (drag.kind === "brush" && mask?.bitmap) {
+    const [u, v] = screenToImage(photo, L, sx, sy);
+    brushStamp(mask.bitmap, photo.maskMap.width, photo.maskMap.height, u, v, state.brushSize, 1, state.tool === "erase");
+    syncMaskTextures(photo);
+  } else if (drag.kind === "retouch") {
+    const [u, v] = screenToImage(photo, L, sx, sy);
+    if (state.tool === "heal") healStamp(photo.pixels, photo.meta.width, photo.meta.height, u, v, state.brushSize);
+    else if (state.cloneSource) cloneStamp(photo.pixels, photo.meta.width, photo.meta.height, u, v, state.cloneSource[0], state.cloneSource[1], state.brushSize);
+    applyPixels(photo);
   }
   requestDraw();
 });
 
 function endDrag() {
   if (!drag) return;
-  const photo = state.photos[state.tab];
+  const photo = activePhoto();
   if (drag.creating && photo) {
     const mask = photo.masks[photo.selectedMask];
-    const L = editLayout(overlay.width, overlay.height);
-    const A = imageToScreen(photo, L, ...mask.a);
-    const B = imageToScreen(photo, L, ...mask.b);
-    if (Math.hypot(B[0] - A[0], B[1] - A[1]) < 8) {
-      mask.b = screenToImage(photo, L, A[0], A[1] + L.rh * 0.3);
+    const L = layouts[state.activeSlot];
+    if (mask?.type === MASK_LINEAR && L) {
+      const A = imageToScreen(photo, L, ...mask.a);
+      const B = imageToScreen(photo, L, ...mask.b);
+      if (Math.hypot(B[0] - A[0], B[1] - A[1]) < 8) {
+        mask.b = screenToImage(photo, L, A[0], A[1] + L.rh * 0.3);
+      }
     }
-    state.maskDraw = false;
+    state.tool = "pan";
     renderPanel();
   }
   drag = null;
@@ -598,11 +876,13 @@ overlay.addEventListener("pointercancel", endDrag);
 overlay.addEventListener(
   "wheel",
   (event) => {
-    const photo = state.photos[state.tab];
-    if (!photo || state.tab === "compare") return;
+    if (state.tab !== "edit") return;
+    const photo = activePhoto();
+    if (!photo) return;
     event.preventDefault();
     const [sx, sy] = pointerPos(event);
-    const L = editLayout(overlay.width, overlay.height);
+    const L = layouts[state.activeSlot];
+    if (!L) return;
     const factor = Math.exp(-event.deltaY * 0.0015);
     photo.geometry = zoomAt(photo.geometry, photo.meta.width, photo.meta.height, currentAspect(), factor, (sx - L.cx) / L.rw, (sy - L.cy) / L.rh);
     syncControls();
@@ -610,12 +890,6 @@ overlay.addEventListener(
   },
   { passive: false },
 );
-
-function updateSplit(sx) {
-  const L = editLayout(overlay.width, overlay.height);
-  state.compare.split = Math.min(1, Math.max(0, (sx - (L.cx - L.rw / 2)) / L.rw));
-  requestDraw();
-}
 
 stage.addEventListener("dragover", (event) => {
   event.preventDefault();
@@ -625,20 +899,36 @@ stage.addEventListener("dragleave", () => stage.classList.remove("is-dragover"))
 stage.addEventListener("drop", (event) => {
   event.preventDefault();
   stage.classList.remove("is-dragover");
+  if (state.tab !== "edit") return;
   const file = event.dataTransfer.files[0];
-  const slot = state.tab in SLOTS ? state.tab : state.photos.before ? "after" : "before";
-  if (file) openPhoto(slot, file).catch(showError);
+  if (!file) return;
+  const [sx, sy] = (() => {
+    const r = overlay.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    return [(event.clientX - r.left) * dpr, (event.clientY - r.top) * dpr];
+  })();
+  const hit = hitSlot(sx, sy);
+  const slot = hit || (state.photos.before ? (state.photos.after ? state.activeSlot : "after") : "before");
+  openPhoto(slot, file).catch(showError);
 });
 
-// ---------- side panel ----------
+// ---------- panel ----------
 
 function setTab(tab) {
   state.tab = tab;
-  state.maskDraw = false;
+  state.tool = "pan";
   drag = null;
   renderPanel();
   requestDraw();
   if (tab === "share") scheduleSharePreview(0);
+}
+
+function setActiveSlot(slot) {
+  if (state.activeSlot === slot) return;
+  state.activeSlot = slot;
+  state.tool = "pan";
+  renderPanel();
+  requestDraw();
 }
 
 function renderPanel() {
@@ -646,55 +936,17 @@ function renderPanel() {
   document.querySelectorAll("[data-tab]").forEach((button) => {
     const tab = button.dataset.tab;
     button.classList.toggle("is-active", tab === state.tab);
-    const needsBoth = tab === "compare" || tab === "share";
-    button.disabled = needsBoth && !(state.photos.before && state.photos.after);
+    if (tab === "share") button.disabled = !(state.photos.before || state.photos.after);
   });
   stage.dataset.tab = state.tab;
   const empty = document.getElementById("empty-message");
-  empty.textContent =
-    state.tab === "after" && !state.photos.before
-      ? "Önce Before fotoğrafını açın, sonra After’ı buraya sürükleyin."
-      : "Fotoğrafı buraya sürükleyin veya sağdaki düğmeyle açın.";
+  empty.textContent = "Sola Before, sağa After fotoğrafını sürükleyin veya çerçeveye tıklayın.";
 
-  panel.replaceChildren(
-    ...(state.tab === "compare" ? comparePanel() : state.tab === "share" ? sharePanel() : editPanel(state.tab)),
-  );
-  renderViewToggle();
+  panel.replaceChildren(...(state.tab === "share" ? sharePanel() : editPanel()));
 }
-
-const AFTER_VIEWS = [
-  ["single", "Yalnız After"],
-  ["side", "Yan yana"],
-  ["split", "Ayraçlı"],
-];
-
-function renderViewToggle() {
-  const node = document.getElementById("view-toggle");
-  node.hidden = !(state.tab === "after" && state.photos.before && state.photos.after);
-  if (node.hidden) return;
-  node.replaceChildren(
-    segmented(AFTER_VIEWS, state.afterView, setAfterView),
-    el("span", { class: "shortcut", title: "Klavyede \\ tuşu Before karşılaştırmasını açıp kapatır" }, "\\ tuşu"),
-  );
-}
-
-function setAfterView(mode) {
-  state.afterView = mode;
-  if (mode !== "single") state.lastAfterCompare = mode;
-  renderViewToggle();
-  requestDraw();
-}
-
-window.addEventListener("keydown", (event) => {
-  if (event.key !== "\\" || event.ctrlKey || event.metaKey || event.altKey) return;
-  if (event.target.closest?.("input, textarea, select")) return;
-  if (!(state.tab === "after" && state.photos.before && state.photos.after)) return;
-  event.preventDefault();
-  setAfterView(state.afterView === "single" ? state.lastAfterCompare : "single");
-});
 
 function syncControls() {
-  const photo = state.photos[state.tab];
+  const photo = activePhoto();
   if (!photo) return;
   for (const [key, setter] of Object.entries(controls)) {
     if (key.startsWith("param:")) setter(photo.params[key.slice(6)]);
@@ -704,35 +956,110 @@ function syncControls() {
   }
 }
 
-function editPanel(slot) {
+function editPanel() {
+  const slot = state.activeSlot;
   const photo = state.photos[slot];
-  const open = el("button", { type: "button", class: "button primary wide", onclick: () => pickFile(slot) }, photo ? "Başka fotoğraf aç" : `${SLOTS[slot]} fotoğrafını aç`);
   const head = section(
-    SLOTS[slot],
+    "Aktif fotoğraf",
+    el(
+      "div",
+      { class: "active-slot" },
+      el("button", { type: "button", class: `chip${slot === "before" ? " is-active" : ""}`, onclick: () => setActiveSlot("before") }, "Before"),
+      el("button", { type: "button", class: `chip${slot === "after" ? " is-active" : ""}`, onclick: () => setActiveSlot("after") }, "After"),
+    ),
     photo
       ? el("p", { class: "file-meta" }, el("strong", {}, photo.meta.name), el("br"), `${photo.meta.isRaw ? "RAW" : "JPEG/PNG"} · ${photo.meta.fullWidth}×${photo.meta.fullHeight}`)
-      : el("p", { class: "hint" }, slot === "before" ? "Referans fotoğraf. Önce bunu düzenleyin." : "After fotoğrafı açınca Before’un ayarları kopyalanır ve renkler otomatik eşleştirilir."),
-    open,
+      : el("p", { class: "hint" }, `${SLOTS[slot]} için fotoğraf yükleyin. Çerçeveye tıklayın veya sürükleyip bırakın.`),
+    el("button", { type: "button", class: "button primary wide", onclick: () => pickFile(slot) }, photo ? "Başka fotoğraf aç" : `${SLOTS[slot]} fotoğrafını aç`),
   );
-  if (!photo) return [head];
+  if (!photo) return [head, section("İpucu", el("p", { class: "hint" }, "After yüklenince Before ayarları kopyalanır ve renkler otomatik eşleştirilir. İki fotoğrafı aynı anda görüp soldakine/sağdakine tıklayarak düzenlersiniz."))];
 
   const sections = [head];
   if (slot === "after") sections.push(matchSection(photo));
-  sections.push(cropSection(photo), lightSection(photo), colorSection(photo), presetSection(photo), maskSection(photo));
+  sections.push(toolsSection(photo), cropSection(photo), lightSection(photo), colorSection(photo), presetSection(photo), maskSection(photo));
   return sections;
+}
+
+function toolsSection(photo) {
+  const tools = [
+    ["pan", "Kaydır"],
+    ["linear", "Doğrusal maske"],
+    ["radial", "Radyal maske"],
+    ["brush", "Fırça maske"],
+    ["erase", "Maske silgi"],
+    ["subject", "Nesne seç"],
+    ["heal", "İyileştir"],
+    ["clone", "Klon / rötüş"],
+  ];
+  return section(
+    "Araçlar",
+    el(
+      "div",
+      { class: "tool-list" },
+      tools.map(([id, label]) =>
+        el(
+          "button",
+          {
+            type: "button",
+            class: `chip${state.tool === id ? " is-active" : ""}`,
+            onclick: () => {
+              state.tool = id;
+              if (id === "subject") showToast("Diş veya nesneye tıklayın.");
+              if (id === "clone") showToast("Alt+tık kaynak, sürükleyerek boyayın.");
+              if (id === "heal") showToast("Diş eti çizgisi vb. üzerinde sürükleyin.");
+              renderPanel();
+              requestDraw();
+            },
+          },
+          label,
+        ),
+      ),
+    ),
+    ["brush", "erase", "heal", "clone"].includes(state.tool)
+      ? slider(
+          { label: "Fırça boyutu", min: 0.01, max: 0.15, step: 0.005, format: (v) => `${Math.round(v * 100)}` },
+          state.brushSize,
+          0.04,
+          (v) => {
+            state.brushSize = v;
+          },
+        ).node
+      : null,
+    el(
+      "button",
+      {
+        type: "button",
+        class: "button wide",
+        onclick: () => {
+          if (photo.masks.length >= MAX_MASKS) return showToast("En fazla 8 maske.", true);
+          pushHistory();
+          const mask = maskDefaults(MASK_BRUSH);
+          mask.bitmap = selectTeethMask(photo.pixels, photo.meta.width, photo.meta.height, photo.maskMap.width, photo.maskMap.height);
+          photo.masks.push(mask);
+          photo.selectedMask = photo.masks.length - 1;
+          photo.showMask = true;
+          syncMaskTextures(photo);
+          renderPanel();
+          requestDraw();
+          showToast("Parlak diş bölgesi seçildi. Invert ile dışı düzenleyebilirsiniz.");
+        },
+      },
+      "Dişleri otomatik seç",
+    ),
+    el("p", { class: "hint" }, "İyileştir: çevredeki dokuya göre yumuşatır. Klon: Alt+tık kaynak, sonra boyayın. Nesne seç / diş seç maske üretir; Invert ile tersine çevirin."),
+  );
 }
 
 function matchSection(photo) {
   const before = state.photos.before;
-  if (!before) {
-    return section("Eşleştirme", el("p", { class: "hint" }, "Eşleştirme için önce Before fotoğrafını açın."));
-  }
+  if (!before) return section("Eşleştirme", el("p", { class: "hint" }, "Eşleştirme için Before gerekli."));
   const strength = slider(
     { label: "Eşleştirme gücü", min: 0, max: 100, step: 1, format: (v) => `%${Math.round(v)}` },
     photo.match ? Math.round(photo.match.strength * 100) : 80,
     80,
     (v) => {
       if (!photo.match) return;
+      pushHistory();
       photo.match.strength = v / 100;
       photo.params = blendMatch(photo.match.base, photo.match.solution, photo.match.strength);
       syncControls();
@@ -749,6 +1076,7 @@ function matchSection(photo) {
         type: "button",
         class: "button primary wide",
         onclick: () => {
+          pushHistory();
           runMatch(photo);
           renderPanel();
           requestDraw();
@@ -758,13 +1086,13 @@ function matchSection(photo) {
       "İlk fotoğrafla eşleştir",
     ),
     strength.node,
-    el("p", { class: "hint" }, "Çerçevede görünen alan analiz edilir. Kadrajı Before ile aynı bölgeye getirip yeniden eşleştirin. Sonra istediğiniz ayarla oynayabilirsiniz."),
     el(
       "button",
       {
         type: "button",
         class: "button wide",
         onclick: () => {
+          pushHistory();
           copyFromBefore(photo);
           renderPanel();
           requestDraw();
@@ -781,6 +1109,7 @@ function cropSection(photo) {
     photo.geometry.zoom,
     1,
     (v) => {
+      pushHistory();
       photo.geometry = { ...photo.geometry, zoom: v };
       requestDraw();
     },
@@ -790,6 +1119,7 @@ function cropSection(photo) {
     photo.geometry.angle,
     0,
     (v) => {
+      pushHistory();
       photo.geometry = { ...photo.geometry, angle: v };
       requestDraw();
     },
@@ -818,6 +1148,7 @@ function cropSection(photo) {
           type: "button",
           class: "button",
           onclick: () => {
+            pushHistory();
             photo.geometry = { ...photo.geometry, quarter: (photo.geometry.quarter + 1) % 4 };
             requestDraw();
           },
@@ -830,6 +1161,7 @@ function cropSection(photo) {
           type: "button",
           class: "button",
           onclick: () => {
+            pushHistory();
             photo.geometry = defaultGeometry();
             syncControls();
             requestDraw();
@@ -838,7 +1170,6 @@ function cropSection(photo) {
         "Kadrajı sıfırla",
       ),
     ),
-    el("p", { class: "hint" }, "Fotoğrafı sürükleyerek kaydırın, fare tekerleğiyle imlecin olduğu yere yakınlaştırın."),
   );
 }
 
@@ -846,6 +1177,7 @@ function paramSliders(photo, defs) {
   const defaults = defaultParams(photo.meta);
   return defs.map((def) => {
     const s = slider(def, photo.params[def.key], defaults[def.key], (v) => {
+      pushHistory();
       photo.params[def.key] = v;
       requestDraw();
     });
@@ -870,6 +1202,7 @@ function colorSection(photo) {
         type: "button",
         class: "button wide",
         onclick: () => {
+          pushHistory();
           photo.params = defaultParams(photo.meta);
           photo.match = null;
           renderPanel();
@@ -904,6 +1237,7 @@ function presetSection(photo) {
           type: "button",
           class: "button",
           onclick: () => {
+            pushHistory();
             applyPreset(photo, all[chosen]);
             syncControls();
             requestDraw();
@@ -913,24 +1247,6 @@ function presetSection(photo) {
       ),
       el("button", { type: "button", class: "button", onclick: () => savePreset(photo) }, "Mevcut ayarı kaydet"),
     ),
-    state.presets.length
-      ? el(
-          "button",
-          {
-            type: "button",
-            class: "button ghost wide",
-            onclick: () => {
-              const name = window.prompt("Silinecek hazır ayarın adı:", state.presets.at(-1).name);
-              if (!name) return;
-              state.presets = state.presets.filter((p) => p.name !== name);
-              storePresets();
-              renderPanel();
-            },
-          },
-          "Kayıtlı hazır ayarı sil",
-        )
-      : null,
-    el("p", { class: "hint" }, "Hazır ayar ışık ve renk ayarlarını uygular; kadraj ve maskeler değişmez."),
   );
 }
 
@@ -958,7 +1274,7 @@ function maskSection(photo) {
   const list = el(
     "div",
     { class: "mask-list" },
-    photo.masks.map((_, i) =>
+    photo.masks.map((mask, i) =>
       el(
         "button",
         {
@@ -970,28 +1286,56 @@ function maskSection(photo) {
             requestDraw();
           },
         },
-        `Maske ${i + 1}`,
+        `${MASK_TYPE_LABELS[mask.type] || "Maske"} ${i + 1}`,
       ),
     ),
   );
-  const add = el(
-    "button",
-    {
-      type: "button",
-      class: `button wide${state.maskDraw ? " is-armed" : ""}`,
-      disabled: photo.masks.length >= MAX_MASKS,
-      onclick: () => {
-        state.maskDraw = !state.maskDraw;
-        renderPanel();
-      },
-    },
-    state.maskDraw ? "Fotoğraf üzerinde sürükleyerek çizin…" : "+ Doğrusal maske",
-  );
   const mask = photo.masks[photo.selectedMask];
-  const children = [add, photo.masks.length ? list : null];
+  const children = [photo.masks.length ? list : el("p", { class: "hint" }, "Araçlardan maske ekleyin.")];
   if (mask) {
+    children.push(
+      el(
+        "label",
+        { class: "check" },
+        el("input", {
+          type: "checkbox",
+          checked: mask.invert,
+          onchange: (e) => {
+            pushHistory();
+            mask.invert = e.target.checked;
+            requestDraw();
+          },
+        }),
+        "Invert (tersine çevir)",
+      ),
+    );
+    if (mask.type === MASK_RADIAL) {
+      children.push(
+        slider(
+          { label: "İç yarıçap", min: 0, max: 0.8, step: 0.01, format: (v) => v.toFixed(2) },
+          mask.inner,
+          0.15,
+          (v) => {
+            pushHistory();
+            mask.inner = Math.min(v, mask.outer - 0.01);
+            requestDraw();
+          },
+        ).node,
+        slider(
+          { label: "Dış yarıçap", min: 0.05, max: 1, step: 0.01, format: (v) => v.toFixed(2) },
+          mask.outer,
+          0.4,
+          (v) => {
+            pushHistory();
+            mask.outer = Math.max(v, mask.inner + 0.01);
+            requestDraw();
+          },
+        ).node,
+      );
+    }
     for (const def of MASK_CONTROLS) {
       const s = slider(def, mask[def.key], 0, (v) => {
+        pushHistory();
         mask[def.key] = v;
         requestDraw();
       });
@@ -1009,7 +1353,7 @@ function maskSection(photo) {
             requestDraw();
           },
         }),
-        "Maske alanını ve tutamaçları göster",
+        "Maske alanını göster",
       ),
       el(
         "button",
@@ -1017,8 +1361,10 @@ function maskSection(photo) {
           type: "button",
           class: "button ghost wide",
           onclick: () => {
+            pushHistory();
             photo.masks.splice(photo.selectedMask, 1);
             photo.selectedMask = photo.masks.length - 1;
+            syncMaskTextures(photo);
             renderPanel();
             requestDraw();
           },
@@ -1027,58 +1373,39 @@ function maskSection(photo) {
       ),
     );
   }
-  children.push(el("p", { class: "hint" }, "Etki düz çizgide tam, kesikli çizgide sıfırdır. Uç noktaları sürükleyerek yönü, ortadaki noktayla konumu değiştirin."));
   return section("Maskeler", ...children);
-}
-
-function comparePanel() {
-  return [
-    section(
-      "Karşılaştır",
-      segmented(
-        [
-          ["split", "Kaydırmalı"],
-          ["side", "Yan yana"],
-        ],
-        state.compare.mode,
-        (v) => {
-          state.compare.mode = v;
-          renderPanel();
-          requestDraw();
-        },
-      ),
-      el("p", { class: "hint" }, "Kaydırmalı görünümde çizgiyi sürükleyin. Beğenmezseniz Before veya After sekmesine dönüp düzenleyin."),
-      el("button", { type: "button", class: "button primary wide", onclick: () => setTab("share") }, "Paylaşım moduna geç"),
-    ),
-  ];
 }
 
 function sharePanel() {
   const s = state.share;
+  const both = state.photos.before && state.photos.after;
   const update = (fn) => {
     fn();
     scheduleSharePreview();
   };
   const sliderOf = (def, value, def0, apply) => slider(def, value, def0, (v) => update(() => apply(v))).node;
-  return [
+  const sections = [
     section(
       "Düzen",
-      select(
-        "Düzen",
-        [
-          ["auto", "Otomatik"],
-          ["side_by_side", "Yan yana"],
-          ["stacked", "Alt alta"],
-        ],
-        s.layout,
-        (v) => update(() => (s.layout = v)),
-      ),
+      both
+        ? select(
+            "Düzen",
+            [
+              ["auto", "Otomatik"],
+              ["side_by_side", "Yan yana"],
+              ["stacked", "Alt alta"],
+            ],
+            s.layout,
+            (v) => update(() => (s.layout = v)),
+          )
+        : el("p", { class: "hint" }, "Tek fotoğraf yüklü — paylaşım tek kare olarak hazırlanır."),
       select(
         "Paylaşım oranı",
         [
           ["4:5", "4:5 Instagram gönderi"],
           ["1:1", "1:1 Kare"],
           ["9:16", "9:16 Story / Reels"],
+          ["16:9", "16:9 Yatay"],
           ["original", "Orijinal"],
         ],
         s.aspect,
@@ -1094,6 +1421,18 @@ function sharePanel() {
         (v) => update(() => (s.fit = v)),
       ),
       el("label", { class: "field" }, el("span", {}, "Dolgu ve ayraç rengi"), el("input", { type: "color", value: s.background, oninput: (e) => update(() => (s.background = e.target.value)) })),
+      both
+        ? el(
+            "label",
+            { class: "check" },
+            el("input", {
+              type: "checkbox",
+              checked: s.showDivider,
+              onchange: (e) => update(() => (s.showDivider = e.target.checked)),
+            }),
+            "Fotoğraflar arasında ayraç çizgisi",
+          )
+        : null,
     ),
     section(
       "Yazılar",
@@ -1103,6 +1442,7 @@ function sharePanel() {
         el("input", { type: "checkbox", checked: s.labels.enabled, onchange: (e) => update(() => (s.labels.enabled = e.target.checked)) }),
         "BEFORE / AFTER yazısı",
       ),
+      select("Yazı tipi", FONT_OPTIONS, s.labels.font, (v) => update(() => (s.labels.font = v))),
       el("label", { class: "field" }, el("span", {}, "Before yazısı"), el("input", { type: "text", value: s.labels.beforeText, maxlength: 40, oninput: (e) => update(() => (s.labels.beforeText = e.target.value)) })),
       el("label", { class: "field" }, el("span", {}, "After yazısı"), el("input", { type: "text", value: s.labels.afterText, maxlength: 40, oninput: (e) => update(() => (s.labels.afterText = e.target.value)) })),
       sliderOf({ label: "Yazı boyutu", min: 2, max: 8, step: 0.5, format: (v) => v.toFixed(1) }, s.labels.sizePercent, 4, (v) => (s.labels.sizePercent = v)),
@@ -1111,12 +1451,18 @@ function sharePanel() {
     ),
     section(
       "Logo",
-      el("p", { class: "file-meta" }, s.logoName ? el("strong", {}, s.logoName) : "Logo seçilmedi"),
-      el("button", { type: "button", class: "button wide", onclick: () => logoInput.click() }, s.logoName ? "Logoyu değiştir" : "Şeffaf PNG logo seç"),
+      el(
+        "div",
+        { class: "logo-picker" },
+        logoChoice("beyaz", "Beyaz logo"),
+        logoChoice("siyah", "Siyah logo"),
+      ),
+      el("p", { class: "file-meta" }, s.logoName ? el("strong", {}, s.logoName) : "Klinik logolarından birini seçin veya kendi PNG’nizi yükleyin"),
+      el("button", { type: "button", class: "button wide", onclick: () => logoInput.click() }, "Kendi logosunu yükle"),
       select(
         "Konum",
         [
-          ["divider", "Ortada, ayraç üstünde"],
+          ["divider", "Ortada / ayraç"],
           ["bottom_right", "Sağ alt köşe"],
           ["top_right", "Sağ üst köşe"],
         ],
@@ -1127,42 +1473,92 @@ function sharePanel() {
       sliderOf({ label: "Logo opaklığı", min: 10, max: 100, step: 1, format: (v) => `%${v}` }, Math.round(s.logo.opacity * 100), 90, (v) => (s.logo.opacity = v / 100)),
     ),
     section(
+      "Vinyet",
+      select(
+        "Uygulama",
+        [
+          ["off", "Kapalı"],
+          ["before", "Yalnız Before"],
+          ["after", "Yalnız After"],
+          ["both", "Before ve After ayrı ayrı"],
+          ["canvas", "Tek karede (tüm görsel)"],
+        ],
+        s.vignette.mode,
+        (v) => update(() => (s.vignette.mode = v)),
+      ),
+      sliderOf({ label: "Yoğunluk", min: 0, max: 100, step: 1, format: (v) => `%${v}` }, Math.round(s.vignette.amount * 100), 45, (v) => (s.vignette.amount = v / 100)),
+      sliderOf({ label: "Başlangıç", min: 20, max: 90, step: 1, format: (v) => `%${v}` }, Math.round(s.vignette.midpoint * 100), 55, (v) => (s.vignette.midpoint = v / 100)),
+      el("p", { class: "hint" }, "Instagram’da kenarları yumuşatmak için. Ayrı ayrı: her panele; tek karede: birleşik görsele uygulanır."),
+    ),
+    section(
       "İndir",
       el("p", { class: "hint", id: "share-info" }, s.previewInfo),
       el("button", { type: "button", class: "button primary wide", onclick: () => exportComposite("png").catch(showError) }, "Paylaşım görseli · PNG"),
       el("button", { type: "button", class: "button wide", onclick: () => exportComposite("jpeg").catch(showError) }, "Paylaşım görseli · JPEG %100"),
-      el("button", { type: "button", class: "button wide", onclick: () => exportSingle("after", "jpeg").catch(showError) }, "Yalnız After · JPEG"),
-      el("button", { type: "button", class: "button wide", onclick: () => exportSingle("after", "tiff").catch(showError) }, "Yalnız After · TIFF"),
-      el("button", { type: "button", class: "button wide", onclick: () => exportSingle("before", "jpeg").catch(showError) }, "Yalnız Before · JPEG"),
-      el("p", { class: "hint" }, "Dosyalar tam çözünürlükte hazırlanır; RAW fotoğraflarda birkaç saniye sürebilir. Çıktı sosyal medya içindir, klinik teşhis kaydının yerine geçmez."),
-    ),
-    section(
-      "Kaydırmalı video",
-      el(
-        "p",
-        { class: "hint" },
-        "Önce Before görünür, ayraç kayıp After'ı gösterir, birkaç kez ileri geri gider ve After'da durur. Oran, sığdırma, yazılar ve logo yukarıdaki ayarlardan gelir; Reels için 9:16, gönderi için 4:5 seçin.",
-      ),
-      select(
-        "Süre",
-        [
-          ["short", `Kısa (${VIDEO_DURATIONS.short} sn)`],
-          ["normal", `Normal (${VIDEO_DURATIONS.normal} sn)`],
-          ["long", `Uzun (${VIDEO_DURATIONS.long} sn)`],
-        ],
-        s.videoDuration,
-        (v) => (s.videoDuration = v),
-      ),
-      el("button", { type: "button", class: "button primary wide", onclick: () => exportSliderVideo().catch(showError) }, "Kaydırmalı video · MP4"),
+      state.photos.after ? el("button", { type: "button", class: "button wide", onclick: () => exportSingle("after", "jpeg").catch(showError) }, "Yalnız After · JPEG") : null,
+      state.photos.before ? el("button", { type: "button", class: "button wide", onclick: () => exportSingle("before", "jpeg").catch(showError) }, "Yalnız Before · JPEG") : null,
     ),
   ];
+  if (both) {
+    sections.push(
+      section(
+        "Kaydırmalı video",
+        el("p", { class: "hint" }, "Önce Before, ayraç kayıp After’ı gösterir. Reels için 9:16, gönderi için 4:5."),
+        select(
+          "Süre",
+          [
+            ["short", `Kısa (${VIDEO_DURATIONS.short} sn)`],
+            ["normal", `Normal (${VIDEO_DURATIONS.normal} sn)`],
+            ["long", `Uzun (${VIDEO_DURATIONS.long} sn)`],
+          ],
+          s.videoDuration,
+          (v) => (s.videoDuration = v),
+        ),
+        el("button", { type: "button", class: "button primary wide", onclick: () => exportSliderVideo().catch(showError) }, "Kaydırmalı video · MP4"),
+      ),
+    );
+  }
+  return sections;
+}
+
+function logoChoice(variant, label) {
+  const s = state.share;
+  return el(
+    "button",
+    {
+      type: "button",
+      class: `logo-choice${s.logo.variant === variant && !s.logoName?.startsWith("özel") ? " is-active" : ""}`,
+      "data-variant": variant,
+      onclick: () => {
+        s.logo.variant = variant;
+        s.logoBytes = s.clinicLogos[variant];
+        s.logoName = variant === "beyaz" ? "Klinik logo (beyaz)" : "Klinik logo (siyah)";
+        renderPanel();
+        scheduleSharePreview(0);
+      },
+    },
+    el("img", { src: `/logos/${variant}.png`, alt: label }),
+    label,
+  );
 }
 
 // ---------- share / export ----------
 
 function shareHeader(format) {
   const s = state.share;
-  return { format, settings: { layout: s.layout, aspect: s.aspect, fit: s.fit, background: s.background, labels: s.labels, logo: s.logo } };
+  return {
+    format,
+    settings: {
+      layout: s.layout,
+      aspect: s.aspect,
+      fit: s.fit,
+      background: s.background,
+      showDivider: s.showDivider,
+      labels: s.labels,
+      logo: s.logo,
+      vignette: s.vignette,
+    },
+  };
 }
 
 function rgbaPart(render) {
@@ -1176,16 +1572,19 @@ function scheduleSharePreview(delay = 250) {
 
 async function updateSharePreview() {
   const { before, after } = state.photos;
-  if (state.tab !== "share" || !before || !after) return;
-  const response = await postParts("/api/compose", shareHeader("preview"), {
-    before: rgbaPart(renderSmall(before, SHARE_PREVIEW_SIDE)),
-    after: rgbaPart(renderSmall(after, SHARE_PREVIEW_SIDE)),
+  if (state.tab !== "share" || (!before && !after)) return;
+  const parts = {
+    before: before ? rgbaPart(renderSmall(before, SHARE_PREVIEW_SIDE)) : null,
+    after: after ? rgbaPart(renderSmall(after, SHARE_PREVIEW_SIDE)) : null,
     logo: state.share.logoBytes ? { bytes: state.share.logoBytes, meta: {} } : null,
-  });
+  };
+  const response = await postParts("/api/compose", shareHeader("preview"), parts);
   const blob = await response.blob();
   if (state.share.previewUrl) URL.revokeObjectURL(state.share.previewUrl);
   state.share.previewUrl = URL.createObjectURL(blob);
-  const layout = response.headers.get("X-Layout") === "stacked" ? "Alt alta" : "Yan yana";
+  const layoutHeader = response.headers.get("X-Layout");
+  const layout =
+    layoutHeader === "stacked" ? "Alt alta" : layoutHeader === "single" ? "Tek kare" : "Yan yana";
   state.share.previewInfo = `${layout} düzen. Önizleme; indirilen dosya tam çözünürlüktedir.`;
   sharePreview.src = state.share.previewUrl;
   const info = document.getElementById("share-info");
@@ -1196,14 +1595,14 @@ async function updateSharePreview() {
 async function exportComposite(format) {
   const { before, after } = state.photos;
   await withBusy("Tam çözünürlük hazırlanıyor…", async () => {
-    const b = await renderFull(before);
-    const a = await renderFull(after);
-    const response = await postParts("/api/compose", shareHeader(format), {
-      before: rgbaPart(b),
-      after: rgbaPart(a),
+    const parts = {
+      before: before ? rgbaPart(await renderFull(before)) : null,
+      after: after ? rgbaPart(await renderFull(after)) : null,
       logo: state.share.logoBytes ? { bytes: state.share.logoBytes, meta: {} } : null,
-    });
-    download(await response.blob(), `${stem(after.meta.name)}_before_after.${format === "jpeg" ? "jpg" : "png"}`);
+    };
+    const response = await postParts("/api/compose", shareHeader(format), parts);
+    const name = stem((after || before).meta.name);
+    download(await response.blob(), `${name}_${before && after ? "before_after" : "paylasim"}.${format === "jpeg" ? "jpg" : "png"}`);
   });
 }
 
@@ -1275,10 +1674,21 @@ logoInput.addEventListener("change", async () => {
   const file = logoInput.files[0];
   if (!file) return;
   state.share.logoBytes = new Uint8Array(await file.arrayBuffer());
-  state.share.logoName = file.name;
+  state.share.logoName = `özel: ${file.name}`;
   renderPanel();
   scheduleSharePreview(0);
 });
+
+clearBefore.addEventListener("click", (e) => {
+  e.stopPropagation();
+  clearPhoto("before");
+});
+clearAfter.addEventListener("click", (e) => {
+  e.stopPropagation();
+  clearPhoto("after");
+});
+btnUndo.addEventListener("click", undo);
+btnRedo.addEventListener("click", redo);
 
 function setBusyMessage(message) {
   busy.querySelector("span").textContent = message;
@@ -1322,13 +1732,45 @@ function storePresets() {
   localStorage.setItem(PRESET_STORAGE_KEY, JSON.stringify(state.presets));
 }
 
+async function loadClinicLogos() {
+  for (const variant of ["beyaz", "siyah"]) {
+    try {
+      const response = await fetch(`/logos/${variant}.png`);
+      if (!response.ok) continue;
+      state.share.clinicLogos[variant] = new Uint8Array(await response.arrayBuffer());
+    } catch {
+      // Optional assets.
+    }
+  }
+  if (state.share.clinicLogos.beyaz) {
+    state.share.logoBytes = state.share.clinicLogos.beyaz;
+    state.share.logoName = "Klinik logo (beyaz)";
+    state.share.logo.variant = "beyaz";
+  }
+}
+
 document.querySelectorAll("[data-tab]").forEach((button) => button.addEventListener("click", () => setTab(button.dataset.tab)));
 window.addEventListener("resize", requestDraw);
+window.addEventListener("keydown", (event) => {
+  const mod = event.ctrlKey || event.metaKey;
+  if (!mod) return;
+  if (event.target.closest?.("input, textarea, select")) return;
+  const key = event.key.toLowerCase();
+  if (key === "z" && !event.shiftKey) {
+    event.preventDefault();
+    undo();
+  } else if ((key === "z" && event.shiftKey) || key === "y") {
+    event.preventDefault();
+    redo();
+  }
+});
 
 try {
   renderer = new Renderer(glCanvas);
 } catch (error) {
   showError(error);
 }
-renderPanel();
-requestDraw();
+loadClinicLogos().finally(() => {
+  renderPanel();
+  requestDraw();
+});
