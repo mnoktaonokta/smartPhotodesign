@@ -95,6 +95,20 @@ def create_app(allowed_hosts: list[str] | None = None) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts or ALLOWED_HOSTS)
     store = ImageStore()
 
+    @app.middleware("http")
+    async def no_store_static(request: Request, call_next):
+        # Office machines often keep stale JS after git pull; never cache the UI.
+        response = await call_next(request)
+        path = request.url.path
+        if path == "/" or path.endswith((".html", ".js", ".css", ".mjs")):
+            response.headers["Cache-Control"] = "no-store, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+        return response
+
+    @app.get("/api/version")
+    async def version() -> dict[str, str]:
+        return {"build": "nodim-2", "note": "pasif karartma kapali"}
+
     @app.post("/api/images")
     async def upload_image(request: Request, name: str) -> dict[str, Any]:
         body = await request.body()

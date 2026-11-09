@@ -1897,6 +1897,7 @@ try {
 } catch (error) {
   showError(error);
 }
+document.documentElement.dataset.build = "nodim-2";
 loadClinicLogos().finally(() => {
   renderPanel();
   requestDraw();
