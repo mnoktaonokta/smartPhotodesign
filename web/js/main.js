@@ -579,10 +579,9 @@ function drawFrameOverlay(L, dpr, thirds, active) {
   const ctx = overlayCtx;
   const x = L.cx - L.rw / 2;
   const y = L.cy - L.rh / 2;
+  // Never dim the inactive photo — colors must stay comparable side by side.
+  // Active side is marked only by the teal frame + slot label.
   if (!active) {
-    // Dim inactive photo so the active side reads clearly.
-    ctx.fillStyle = "rgba(10, 10, 12, 0.38)";
-    ctx.fillRect(x, y, L.rw, L.rh);
     ctx.strokeStyle = "rgba(255,255,255,0.28)";
     ctx.lineWidth = 1 * dpr;
     ctx.strokeRect(x, y, L.rw, L.rh);
