@@ -8,9 +8,20 @@ set "PY=.venv\Scripts\python.exe"
 if exist "%PY%" goto install
 
 echo Ilk kurulum yapiliyor, birkac dakika surebilir...
+rem Prefer 3.13/3.12 — newer Pythons (3.14+) often lack rawpy wheels and fail to build.
 where py >nul 2>nul
 if %errorlevel%==0 (
-  py -3 -m venv .venv
+  py -3.13 -m venv .venv 2>nul
+  if not exist "%PY%" py -3.12 -m venv .venv 2>nul
+  if not exist "%PY%" py -3.11 -m venv .venv 2>nul
+  if not exist "%PY%" (
+    echo.
+    echo Python 3.13 / 3.12 bulunamadi. py -3 kullanilmayacak ^(cok yeni surum rawpy kuramaz^).
+    echo https://www.python.org/downloads/ adresinden Python 3.13 kurun.
+    echo Kurulumun ilk ekraninda "Add python.exe to PATH" kutusunu isaretleyin.
+    pause
+    goto end
+  )
 ) else (
   python -m venv .venv
 )
@@ -44,7 +55,9 @@ goto end
 
 :fail
 echo.
-echo Paket kurulumu basarisiz oldu. Internet baglantisini kontrol edip tekrar deneyin.
+echo Paket kurulumu basarisiz oldu.
+echo Sik neden: cok yeni Python ^(3.14/3.15^). Python 3.13 kurup .venv klasorunu silin, tekrar deneyin.
+echo Internet / pypi.org engeli de ayni hatayi verebilir.
 pause
 
 :end
