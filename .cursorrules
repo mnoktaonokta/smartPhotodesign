@@ -11,3 +11,10 @@
 
 3. Hata Yönetimi:
 - Hata aldığımda bana hatanın neden kaynaklandığını uzun uzun anlatma. Hatayı düzelten doğrudan çözümü ver.
+
+# Proje Teknoloji Standartları
+- Projede tespit ettiğin teknolojileri kullan:
+  - Temel teknolojiler: Python, FastAPI + Uvicorn, ham HTML/JavaScript (React/Vue yok), WebGL2, Pillow/OpenCV/rawpy/NumPy; veritabanı yok (bellekte işleme); Tailwind yok (stil `web/styles.css` ile).
+  - Stil yaklaşımı: koyu arayüz, CSS değişkenleri, teal/turkuaz vurgu rengi, sistem yazı tipi, Lightroom benzeri kaydırıcılar ve araç paneli.
+  - Proje yapısı: `smartphoto/` (sunucu), `core/` (fotoğraf yükleme ve paylaşım görseli), `web/` (tarayıcı arayüzü: `index.html`, `styles.css`, `js/`), `assets/` (fontlar ve logolar), `tests/`, `Baslat-Windows.bat` / `Baslat-Mac.command`.
+- Projedeki mevcut klasör yapısına ve yazım kurallarına sadık kal.
