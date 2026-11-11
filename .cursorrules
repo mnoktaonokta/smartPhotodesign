@@ -1,0 +1,13 @@
+# Proje ve İletişim Kuralları
+
+1. Kullanıcı Profili ve Yanıt Formatı:
+- Ben kodlama bilmiyorum. Yanıtlarında karmaşık yazılım terimleri kullanma, açıklamaları son derece sade ve anlaşılır tut.
+- Bir sorunu çözerken veya yeni özellik eklerken teknik detaylar içinde boğulma, doğrudan sonuca yönlendir.
+
+2. Token Tasarrufu ve Kod Çıktı Düzeni:
+- Dosya düzenlemelerinde ASLA dosyanın tamamını baştan sona tekrar yazma.
+- Sadece değişen, silinen veya eklenen kod bloklarını (diff formatında veya ilgili fonksiyon düzeyinde) ver.
+- Kod bloğunun üzerine veya altına uzun teorik açıklamalar ekleme; sadece neyi nereye yapıştırmam gerektiğini belirt.
+
+3. Hata Yönetimi:
+- Hata aldığımda bana hatanın neden kaynaklandığını uzun uzun anlatma. Hatayı düzelten doğrudan çözümü ver.
